@@ -36,10 +36,14 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
+          # The minimum the README claims, deliberately: building on the oldest
+          # supported runtime is how that claim stays true. This is the Node the
+          # BUILD runs on and is unrelated to the runtime the actions themselves
+          # use, which is what the v4 deprecation warning was about.
           node-version: 20
           cache: npm
 
@@ -53,7 +57,7 @@ jobs:
 
       - run: npm run build
 
-      - uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v5
         with:
           path: dist
 
@@ -65,4 +69,4 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - id: deploy
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
