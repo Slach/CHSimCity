@@ -432,20 +432,74 @@ describe('the read path', () => {
 })
 
 describe('the Distributed table', () => {
+  /** Rows routed to `shard`, summed over every server's own Distributed table. */
+  const routed = (sim: SimApi, shard: number): number => {
+    let total = 0
+    for (const n of sim.state.nodes) total += n.distributed.rowsToShard[shard]
+    return total
+  }
+
   it('routes rows to every shard', () => {
     const sim = makeSim({ insertsPerSec: 20, insertBlockRows: 50000 })
     run(sim, 30)
     for (let s = 0; s < N_SHARDS; s++) {
-      expect(sim.state.distributed.rowsToShard[s]).toBeGreaterThan(0)
+      expect(routed(sim, s)).toBeGreaterThan(0)
     }
+  })
+
+  it('exists on every server, not on one of them', () => {
+    // The correction this shape exists for: `Distributed` is a table created on
+    // every node by the same DDL, so with a driver that spreads its connections
+    // EVERY server routes rows — there is no single initiator machine.
+    const sim = makeSim({ clientBalancing: 'round_robin', insertsPerSec: 24, insertBlockRows: 50000 })
+    run(sim, 40)
+    for (let n = 0; n < N_NODES; n++) {
+      const d = sim.state.nodes[n].distributed
+      expect(d.insertsInitiated, `node ${n} initiated nothing`).toBeGreaterThan(0)
+      expect(d.rowsToShard[0] + d.rowsToShard[1], `node ${n} routed nothing`).toBeGreaterThan(0)
+    }
+  })
+
+  it('puts every statement on one server when the driver has one hostname', () => {
+    // `single` is one hostname in a connection string. The data is distributed
+    // exactly as before; the fan-out and the result merging are not.
+    const sim = makeSim({ clientBalancing: 'single', insertsPerSec: 24, insertBlockRows: 50000 })
+    // A DELTA. `createSim` warms the cluster up on the DEFAULT knobs — which
+    // spread the connections — before these are applied, so every server has
+    // already initiated something by the time the test starts.
+    const before = sim.state.nodes.map((n) => n.distributed.insertsInitiated)
+    run(sim, 40)
+    let initiators = 0
+    for (let n = 0; n < N_NODES; n++) {
+      if (sim.state.nodes[n].distributed.insertsInitiated > before[n]) initiators++
+    }
+    expect(initiators).toBe(1)
+    // …and the rows still reached both shards, which is the point: the skew is
+    // in who does the work, not in where the data went.
+    for (let s = 0; s < N_SHARDS; s++) expect(routed(sim, s)).toBeGreaterThan(0)
   })
 
   it('spools nothing in foreground mode', () => {
     const sim = makeSim({ distributedInsert: 'foreground', insertsPerSec: 20, insertBlockRows: 50000 })
     run(sim, 30)
-    for (let s = 0; s < N_SHARDS; s++) {
-      expect(sim.state.distributed.pendingBlocks[s]).toBe(0)
+    for (let n = 0; n < N_NODES; n++) {
+      for (let s = 0; s < N_SHARDS; s++) {
+        expect(sim.state.nodes[n].distributed.pendingBlocks[s]).toBe(0)
+      }
     }
+  })
+
+  it('never makes a server that is down the initiator', () => {
+    // Every real driver fails over. The statement must not be dropped and must
+    // not be handed to the dead server either.
+    const sim = makeSim({ nodeDown: true, insertsPerSec: 30, insertBlockRows: 50000 })
+    run(sim, 40)
+    const dead = N_NODES - 1
+    expect(sim.state.nodes[dead].status).toBe('down')
+    const before = sim.state.nodes[dead].distributed.insertsInitiated
+    run(sim, 20)
+    expect(sim.state.nodes[dead].distributed.insertsInitiated).toBe(before)
+    expect(sim.state.clients.reachable).toBe(N_NODES - 1)
   })
 
   it('never routes a write to a node that is down', () => {

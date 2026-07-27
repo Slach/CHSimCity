@@ -784,6 +784,11 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       own(new THREE.MeshBasicMaterial({ map: hostTex, transparent: true, depthWrite: false, toneMapped: false })),
     )
     hostPlate.rotation.x = -Math.PI / 2
+    // Painted on the deck, so it has one right way up and it must be the way the
+    // visitor arrives from — which is the application tier, in the north. Laying
+    // the plane flat alone leaves it legible from the SOUTH, and the establishing
+    // shot used to be down there; it is not any more.
+    hostPlate.rotation.z = Math.PI
     hostPlate.position.set(mastX + 20, 0.3, mastZ)
     hostPlate.raycast = () => {}
     g.add(hostPlate)

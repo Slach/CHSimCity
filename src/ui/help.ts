@@ -33,7 +33,7 @@ const KEYS: [string, string][] = [
   [', .', 'Slower / faster'],
   ['N', 'Day / night'],
   ['R', 'Reset the cluster'],
-  ['1 – 7', 'Jump: clients, initiator, the four nodes, Keeper'],
+  ['1 – 7', 'Jump: clients, a Distributed table, the four servers, Keeper'],
 ]
 
 /** In fly mode the movement keys mean something the orbit list does not cover. */
@@ -80,7 +80,7 @@ const LEGEND: [string, string, string][] = [
   ['keeper', 'Keeper', 'metadata, and never data'],
   ['hot', 'hot volume', 'local SSD'],
   ['cold', 'cold volume', 'object storage'],
-  ['distributed', 'Distributed', 'the initiator and its routing'],
+  ['distributed', 'Distributed', 'the routing table every server has'],
   ['client', 'clients', 'the application tier'],
 ]
 

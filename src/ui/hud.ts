@@ -497,10 +497,16 @@ export function createHud(ctx: UiContext): UiModule {
    * Keyboard
    * ====================================================================*/
 
-  /** District jump targets for keys 1–7. */
+  /**
+   * District jump targets for keys 1–6.
+   *
+   * There is no key for a Distributed district any more, because there is no
+   * such place: every server has the table, so `2` is now the first server's
+   * copy of it and each island's own is on the island.
+   */
   const DISTRICT_KEYS: readonly string[] = [
     'clients',
-    'dist',
+    'node.0.dist',
     'node.0',
     'node.1',
     'node.2',

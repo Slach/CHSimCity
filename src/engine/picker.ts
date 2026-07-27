@@ -191,7 +191,6 @@ export function createPicker(opts: {
   /** Fallback accent per district; ComponentDef.color wins. */
   const districtColor: Record<DistrictId, number> = {
     clients: theme.color.client,
-    distributed: theme.color.distributed,
     nodes: theme.color.node,
     storage: theme.color.hot,
     merges: theme.color.merge,

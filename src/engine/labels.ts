@@ -117,7 +117,6 @@ const MAX_RECTS = 96
 /** Fallback accent per district, overridden by ComponentDef.color. */
 const DISTRICT_COLOR: Record<DistrictId, number> = {
   clients: COLOR.client,
-  distributed: COLOR.distributed,
   nodes: COLOR.node,
   storage: COLOR.hot,
   merges: COLOR.merge,

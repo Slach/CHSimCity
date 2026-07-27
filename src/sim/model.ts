@@ -237,6 +237,27 @@ export function createSim(bus: Bus): SimApi {
    * state.nodes[i].tables[t].parts forever, so the ARRAY OBJECTS must never be
    * replaced — only their contents. ------------------------------------- */
 
+  /**
+   * One server's `Distributed` table. There are `N_NODES` of these and they are
+   * identical at boot, because the DDL that creates them is identical — the
+   * asymmetry between servers only ever comes from where the clients connect.
+   */
+  function makeDistributed(): DistributedSim {
+    return {
+      pendingBlocks: new Array(N_SHARDS).fill(0),
+      pendingBytes: new Array(N_SHARDS).fill(0),
+      lastShard: 0,
+      rowsToShard: new Array(N_SHARDS).fill(0),
+      readShard: new Array(N_SHARDS).fill(-1),
+      fanOut: 0,
+      rowsMerged: 0,
+      bytesFromRemote: 0,
+      queriesInitiated: 0,
+      insertsInitiated: 0,
+      activity: 0,
+    }
+  }
+
   function makeCache(capacityMib: number): CacheSim {
     return {
       capacityBytes: capacityMib * MIB,
@@ -390,6 +411,10 @@ export function createSim(bus: Bus): SimApi {
       queriesServed: 0,
       blocksWritten: 0,
       cpu: 0,
+      // Every server has the `Distributed` table, because `CREATE TABLE …
+      // ENGINE = Distributed(…)` is run on every server. Whether this one is
+      // currently an initiator depends only on where the clients pointed.
+      distributed: makeDistributed(),
     })
   }
 
@@ -408,17 +433,6 @@ export function createSim(bus: Bus): SimApi {
     })
   }
 
-  const distributed: DistributedSim = {
-    pendingBlocks: new Array(N_SHARDS).fill(0),
-    pendingBytes: new Array(N_SHARDS).fill(0),
-    lastShard: 0,
-    rowsToShard: new Array(N_SHARDS).fill(0),
-    readShard: new Array(N_SHARDS).fill(-1),
-    fanOut: 0,
-    rowsMerged: 0,
-    bytesFromRemote: 0,
-    activity: 0,
-  }
 
   const state: SimState = {
     t: 0,
@@ -427,7 +441,13 @@ export function createSim(bus: Bus): SimApi {
     tables: TABLES,
     nodes,
     keepers,
-    distributed,
+    clients: {
+      lastInsertTarget: 0,
+      lastSelectTarget: 0,
+      sentToNode: new Array(N_NODES).fill(0),
+      reachable: N_NODES,
+      activity: 0,
+    },
     stats: {
       insertsPerSec: 0,
       selectsPerSec: 0,
@@ -892,7 +912,7 @@ export function createSim(bus: Bus): SimApi {
   }
 
   /* ======================================================================
-   * THE DISTRIBUTED TABLE
+   * THE DISTRIBUTED TABLE — ON EVERY SERVER
    *
    * A `Distributed` table stores nothing. On INSERT it evaluates the sharding
    * expression per row, splits the block, and either forwards each piece
@@ -900,10 +920,57 @@ export function createSim(bus: Bus): SimApi {
    * and forwards it in the background. On SELECT it rewrites the query for one
    * replica of each shard, sends it, and merges the partial results.
    *
+   * There is no initiator NODE. The DDL runs on every server, so all four have
+   * the table and all four can do this; the initiator of a given statement is
+   * whichever server the client opened a connection to. Everything below is
+   * therefore parameterised by that server.
+   *
    * The spool is the part people get wrong: in background mode the INSERT
-   * returns as soon as the *initiator* has the data on disk. If the initiator
-   * dies, those blocks are on the initiator's disk, not in the shards.
+   * returns as soon as THE SERVER THE CLIENT REACHED has the data on its own
+   * disk. If that server dies, those blocks are on its disk, not in the shards
+   * — and which server it was is a property of the client's connection, not of
+   * the cluster.
    * ====================================================================*/
+
+  /**
+   * Which server the application connects to for the next statement, and so
+   * which one becomes its initiator.
+   *
+   * This is the driver's decision, not ClickHouse's. `round_robin` is a driver
+   * with the whole cluster in its connection string; `single` is the far more
+   * common one hostname, and it is why one server in a cluster is sometimes at
+   * twice everyone else's CPU while holding exactly the same data.
+   *
+   * A server that is down cannot be an initiator. Every real driver fails over,
+   * so this returns another server rather than dropping the statement — but
+   * when nothing is reachable it returns -1 and the caller must not invent a
+   * fallback.
+   */
+  function pickInitiator(): number {
+    const live: number[] = []
+    for (let n = 0; n < N_NODES; n++) if (nodes[n].status !== 'down') live.push(n)
+    state.clients.reachable = live.length
+    if (live.length === 0) return -1
+    switch (K.clientBalancing) {
+      case 'single':
+        // One hostname. It fails over only because the alternative is an
+        // outage, and it goes back the moment its server returns.
+        return live[0]
+      case 'random':
+        return live[Math.floor(rng() * live.length)]
+      default:
+        clientRoundRobin = (clientRoundRobin + 1) % live.length
+        return live[clientRoundRobin]
+    }
+  }
+
+  let clientRoundRobin = 0
+
+  /** Record that the application sent one statement to `node`. */
+  function noteClientStatement(node: number): void {
+    state.clients.sentToNode[node]++
+    state.clients.activity = Math.min(1, state.clients.activity + 0.25)
+  }
 
   /** Rows this INSERT sends to each shard. Written by `shardBlock`. */
   const shardRows = new Float64Array(N_SHARDS)
@@ -913,7 +980,7 @@ export function createSim(bus: Bus): SimApi {
    * distributes evenly; the skew term below stands in for the far more common
    * real case of a sharding key with a hot value in it.
    */
-  function shardBlock(rows: number, blockId: number): void {
+  function shardBlock(initiator: number, rows: number, blockId: number): void {
     shardRows.fill(0)
     const h = shardHash(blockId)
     // Even split, plus a deterministic ±12% lean that follows the hash. A
@@ -923,7 +990,10 @@ export function createSim(bus: Bus): SimApi {
       const bias = s === 0 ? 1 + lean : 1 - lean
       shardRows[s] = (rows / N_SHARDS) * bias
     }
-    state.distributed.lastShard = h % N_SHARDS
+    // The expression is the same on every server — it comes from the table
+    // definition — so any server splits a given block identically. That is what
+    // makes it safe for the application to write through any of them.
+    nodes[initiator].distributed.lastShard = h % N_SHARDS
   }
 
   /** Which replica of `shard` should receive a write or serve a read. */
@@ -957,8 +1027,6 @@ export function createSim(bus: Bus): SimApi {
   let blockSeq = 1
 
   function tickDistributedInsert(dt: number): void {
-    const d = state.distributed
-
     // Client arrivals: a Poisson process at `insertsPerSec`.
     nextInsertArrival -= dt
     let guard = 400
@@ -974,11 +1042,24 @@ export function createSim(bus: Bus): SimApi {
 
     while (pendingInserts > 0) {
       pendingInserts--
+      // The application opens a connection first, and THAT is what decides
+      // which server's Distributed table does the splitting and whose disk the
+      // spool lands on.
+      const init = pickInitiator()
+      if (init < 0) {
+        toast('Code: 210. Connection refused — no server is reachable', 'warn', 4000)
+        break
+      }
+      const d = nodes[init].distributed
       const table = weightedPick(insertWeights, rng)
       const rows = K.insertBlockRows
       const blockId = blockSeq++
-      shardBlock(rows, blockId)
-      flow(rid.clientInsert, 1, 'insert', 1.4)
+      shardBlock(init, rows, blockId)
+      noteClientStatement(init)
+      state.clients.lastInsertTarget = init
+      d.insertsInitiated++
+      insertCountAcc++
+      flow(rid.clientToNode(init), 1, 'insert', 1.4)
       d.activity = Math.min(1, d.activity + 0.3)
 
       for (let s = 0; s < N_SHARDS; s++) {
@@ -988,33 +1069,46 @@ export function createSim(bus: Bus): SimApi {
         if (K.distributedInsert === 'foreground') {
           // The INSERT does not return until every shard has the data. Slower,
           // and the only mode in which a client learns that a shard is down.
-          deliverToShard(s, table, r)
+          deliverToShard(init, s, table, r)
         } else {
-          // Spooled: `data/<cluster>/shard<N>_replica<M>/*.bin` on the
-          // initiator, flushed by a background thread.
+          // Spooled: `data/<cluster>/shard<N>_replica<M>/*.bin` on the disk of
+          // the server the client reached, flushed by its background thread.
           d.pendingBlocks[s]++
           d.pendingBytes[s] += r * rowCompressed[table]
-          spool[s].push({ table, rows: r, due: state.t + 0.25 + rng() * 0.35 })
+          spool[init][s].push({ table, rows: r, due: state.t + 0.25 + rng() * 0.35 })
         }
       }
     }
 
-    // The background spool flush.
-    for (let s = 0; s < N_SHARDS; s++) {
-      const q = spool[s]
-      while (q.length > 0 && q[0].due <= state.t) {
-        const item = q.shift()!
-        d.pendingBlocks[s] = Math.max(0, d.pendingBlocks[s] - 1)
-        d.pendingBytes[s] = Math.max(0, d.pendingBytes[s] - item.rows * rowCompressed[item.table])
-        deliverToShard(s, item.table, item.rows)
+    // The background spool flush, per server. A server that is down flushes
+    // nothing: its spool is on its own disk and waits for it to come back,
+    // which is the whole risk of the background mode.
+    for (let n = 0; n < N_NODES; n++) {
+      const d = nodes[n].distributed
+      if (nodes[n].status !== 'down') {
+        for (let s = 0; s < N_SHARDS; s++) {
+          const q = spool[n][s]
+          while (q.length > 0 && q[0].due <= state.t) {
+            const item = q.shift()!
+            d.pendingBlocks[s] = Math.max(0, d.pendingBlocks[s] - 1)
+            d.pendingBytes[s] = Math.max(0, d.pendingBytes[s] - item.rows * rowCompressed[item.table])
+            deliverToShard(n, s, item.table, item.rows)
+          }
+        }
       }
+      d.activity = damp(d.activity, 0, 2.4, dt)
     }
 
-    d.activity = damp(d.activity, 0, 2.4, dt)
+    state.clients.activity = damp(state.clients.activity, 0, 2.4, dt)
   }
 
-  const spool: { table: number; rows: number; due: number }[][] = []
-  for (let s = 0; s < N_SHARDS; s++) spool.push([])
+  /** `data/<cluster>/shard<N>_replica<M>/` — per server, then per shard. */
+  const spool: { table: number; rows: number; due: number }[][][] = []
+  for (let n = 0; n < N_NODES; n++) {
+    const perShard: { table: number; rows: number; due: number }[][] = []
+    for (let s = 0; s < N_SHARDS; s++) perShard.push([])
+    spool.push(perShard)
+  }
 
   /** Replicas of `shard` that could acknowledge a write right now. */
   function liveReplicas(shard: number): number {
@@ -1040,7 +1134,7 @@ export function createSim(bus: Bus): SimApi {
     }
   }
 
-  function deliverToShard(shard: number, table: number, rows: number): void {
+  function deliverToShard(from: number, shard: number, table: number, rows: number): void {
     const node = pickReplica(shard, true)
     if (node < 0) {
       toast(`Code: 279. All connection tries failed for shard ${shard + 1}`, 'warn', 5000)
@@ -1066,7 +1160,11 @@ export function createSim(bus: Bus): SimApi {
       return
     }
 
-    flow(rid.shardInsert(node), 1, 'insert', 1.3)
+    // Over the wire only when it is going to a DIFFERENT server. A server that
+    // holds the shard it just hashed a row to writes it locally, with no
+    // network hop at all — one of the few genuine wins of writing through a
+    // node that is also a data node, which in this cluster is all of them.
+    if (node !== from) flow(rid.fanInsert(from, node), 1, 'insert', 1.3)
     if (K.asyncInsert) queueAsyncInsert(node, table, rows)
     else writeBlock(node, table, rows)
   }
@@ -1116,7 +1214,8 @@ export function createSim(bus: Bus): SimApi {
     while (pendingSelects > 0) {
       pendingSelects--
       const table = weightedPick(selectWeights, rng)
-      flow(rid.clientSelect, 1, 'query', 1.2)
+      // The client→server hop is emitted inside `startDistributedQuery`, which
+      // is where the server is chosen. Emitting it here would have to guess.
       startDistributedQuery(table)
     }
   }
@@ -1150,8 +1249,20 @@ export function createSim(bus: Bus): SimApi {
   }
 
   function startDistributedQuery(table: number): void {
+    // Same as an INSERT: the client picks a server, and that server is the
+    // initiator. It is not a special node — it is about to read its own shard
+    // alongside the shard it asks the others for.
+    const init = pickInitiator()
+    if (init < 0) {
+      toast('Code: 210. Connection refused — no server is reachable', 'warn', 4000)
+      return
+    }
     const shape = shapeQuery(table)
-    const d = state.distributed
+    const d = nodes[init].distributed
+    noteClientStatement(init)
+    state.clients.lastSelectTarget = init
+    d.queriesInitiated++
+    flow(rid.clientToNode(init), 1, 'query', 1.2)
     let fanned = 0
     for (let s = 0; s < N_SHARDS; s++) {
       const primary = pickReplica(s, false)
@@ -1168,13 +1279,16 @@ export function createSim(bus: Bus): SimApi {
         for (let r = 0; r < N_REPLICAS; r++) {
           const n = nodeIndex(s, r)
           if (nodes[n].status === 'down') continue
-          if (startNodeQuery(n, table, shape, 1 / N_REPLICAS)) fanned++
+          if (startNodeQuery(n, init, table, shape, 1 / N_REPLICAS)) fanned++
         }
-      } else if (startNodeQuery(primary, table, shape, 1)) {
+      } else if (startNodeQuery(primary, init, table, shape, 1)) {
         fanned++
       }
     }
-    d.fanOut = fanned
+    // `fanOut` is recomputed from the live queries once per step in `step`, so
+    // it is not assigned here; `fanned` is only used to tell "the fan-out found
+    // no reachable shard at all" from "it found some".
+    if (fanned === 0) d.readShard.fill(-1)
     d.activity = Math.min(1, d.activity + 0.25)
   }
 
@@ -1183,7 +1297,13 @@ export function createSim(bus: Bus): SimApi {
    * ranges this node is responsible for — 1 normally, 1/replicas with
    * `parallel_replicas`.
    */
-  function startNodeQuery(node: number, table: number, shape: QueryShape, share: number): boolean {
+  function startNodeQuery(
+    node: number,
+    initiator: number,
+    table: number,
+    shape: QueryShape,
+    share: number,
+  ): boolean {
     const n = nodes[node]
     if (n.status === 'down') return false
     if (n.queries.length >= 6) return false // `max_concurrent_queries`
@@ -1286,6 +1406,7 @@ export function createSim(bus: Bus): SimApi {
     const q: QuerySim = {
       id: state.nextQueryId++,
       node,
+      initiator,
       table,
       active: true,
       sql: shape.sql,
@@ -1307,7 +1428,9 @@ export function createSim(bus: Bus): SimApi {
     n.queries.push(q)
     n.queriesServed++
     nt.heat = Math.min(1, nt.heat + 0.25)
-    flow(rid.shardQuery(node), 1, 'query', 1.15)
+    // Only a remote shard costs a network hop. The initiator's own share of the
+    // reading never leaves the machine.
+    if (node !== initiator) flow(rid.fanQuery(initiator, node), 1, 'query', 1.15)
 
     /* --- hand the mark ranges to the pool ------------------------------- */
     assignReaders(node, q)
@@ -1409,12 +1532,21 @@ export function createSim(bus: Bus): SimApi {
       q.bytesRead = Math.round(q.granulesAfterSkip * INDEX_GRANULARITY * p * 12)
       selectRowsAcc[node] += q.granulesAfterSkip * INDEX_GRANULARITY * (dt / q.duration)
       if (p >= 1) {
-        // The partial result goes back to the initiator, which merges it with
-        // the other shard's. Only the initiator ever sees the whole answer.
-        flow(rid.shardResult(node), 1, 'result', 1.1)
-        flow(rid.clientResult, 1, 'result', 1.0)
-        state.distributed.rowsMerged += q.rowsRead
-        state.distributed.bytesFromRemote += q.bytesRead
+        // The partial result goes back to the server that fanned the query out,
+        // which merges it with the other shard's. Only that server ever sees the
+        // whole answer, and the merging is real CPU work done on it — which is
+        // why pointing every client at one hostname concentrates load that the
+        // data distribution alone would have spread.
+        const d = nodes[q.initiator].distributed
+        if (node !== q.initiator) {
+          flow(rid.fanResult(node, q.initiator), 1, 'result', 1.1)
+          // Bytes over the wire, which is what `bytesFromRemote` means. The
+          // initiator's own share never crosses it.
+          d.bytesFromRemote += q.bytesRead
+        }
+        d.rowsMerged += q.rowsRead
+        d.activity = Math.min(1, d.activity + 0.2)
+        flow(rid.nodeToClient(q.initiator), 1, 'result', 1.0)
         queryMsAcc += q.duration * 1000
         queryMsCount++
         n.queries.splice(i, 1)
@@ -2709,15 +2841,29 @@ export function createSim(bus: Bus): SimApi {
 
     tickScenario(dt)
 
-    const insertsBefore = state.distributed.rowsToShard[0] + state.distributed.rowsToShard[1]
+    // The counter is incremented per INSERT statement inside
+    // `tickDistributedInsert`. It used to be inferred here from whether the
+    // routed-rows total had moved, which counted a whole tick's worth of
+    // statements as one.
     tickDistributedInsert(dt)
-    if (state.distributed.rowsToShard[0] + state.distributed.rowsToShard[1] > insertsBefore) insertCountAcc++
 
     const before = state.nextQueryId
     tickClientSelect(dt)
     selectCountAcc += Math.max(0, state.nextQueryId - before) / Math.max(1, N_SHARDS)
 
     for (let i = 0; i < N_NODES; i++) tickNode(i, dt)
+
+    /* `fan_out` is how many shard queries this server has OUTSTANDING right now,
+     * so it is derived from the queries that actually exist rather than
+     * remembered from the last time the server initiated one. Assigning it once
+     * at fan-out and never clearing it left a server that had stopped being an
+     * initiator — because the connection policy changed, say — permanently
+     * claiming a fan-out it no longer had. */
+    for (let i = 0; i < N_NODES; i++) nodes[i].distributed.fanOut = 0
+    for (let i = 0; i < N_NODES; i++) {
+      for (const q of nodes[i].queries) nodes[q.initiator].distributed.fanOut++
+    }
+
     tickKeeper(dt)
     tickStats(dt)
   }
@@ -2749,8 +2895,11 @@ export function createSim(bus: Bus): SimApi {
     state.scenario = null
     state.scenarioT = 0
 
+    // The spool is cleared per server further down, where the rest of each
+    // server's Distributed state is. Truncating `spool[s]` here — which is what
+    // this loop used to do, from when the spool was indexed by shard alone —
+    // deleted the per-shard arrays instead of emptying them.
     for (let s = 0; s < N_SHARDS; s++) {
-      spool[s].length = 0
       for (let t = 0; t < N_TABLES; t++) keeperLog[s][t].length = 0
     }
 
@@ -2847,16 +2996,28 @@ export function createSim(bus: Bus): SimApi {
       k.activity = 0
     }
 
-    const d = state.distributed
-    d.pendingBlocks.fill(0)
-    d.pendingBytes.fill(0)
-    d.rowsToShard.fill(0)
-    d.readShard.fill(-1)
-    d.lastShard = 0
-    d.fanOut = 0
-    d.rowsMerged = 0
-    d.bytesFromRemote = 0
-    d.activity = 0
+    // Every server's own Distributed table, and its own spool directory.
+    for (let n = 0; n < N_NODES; n++) {
+      const d = nodes[n].distributed
+      d.pendingBlocks.fill(0)
+      d.pendingBytes.fill(0)
+      d.rowsToShard.fill(0)
+      d.readShard.fill(-1)
+      d.lastShard = 0
+      d.fanOut = 0
+      d.rowsMerged = 0
+      d.bytesFromRemote = 0
+      d.queriesInitiated = 0
+      d.insertsInitiated = 0
+      d.activity = 0
+      for (let s = 0; s < N_SHARDS; s++) spool[n][s].length = 0
+    }
+    state.clients.sentToNode.fill(0)
+    state.clients.lastInsertTarget = 0
+    state.clients.lastSelectTarget = 0
+    state.clients.reachable = N_NODES
+    state.clients.activity = 0
+    clientRoundRobin = 0
 
     stats.insertsPerSec = 0
     stats.selectsPerSec = 0

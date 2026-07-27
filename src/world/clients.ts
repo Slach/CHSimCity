@@ -203,21 +203,15 @@ export const createClients: WorldFactory = (ctx): WorldModule => {
     }
     palletMesh.instanceColor!.needsUpdate = true
 
-    /* Flow emission. The world drives the client's own traffic rather than the
-     * model, because a client packet is presentation: the model already counted
-     * the INSERT when it arrived at the initiator. */
-    insertTimer -= dt
-    if (k.insertsPerSec > 0 && insertTimer <= 0) {
-      insertTimer = 1 / Math.min(12, k.insertsPerSec)
-      ctx.flow({ route: rid.clientInsert, count: 1, kind: 'insert', color: COLOR.client })
-      writeGlow = 1
-    }
-    selectTimer -= dt
-    if (k.selectsPerSec > 0 && selectTimer <= 0) {
-      selectTimer = 1 / Math.min(14, k.selectsPerSec)
-      ctx.flow({ route: rid.clientSelect, count: 1, kind: 'query', color: COLOR.reader })
-      readGlow = 1
-    }
+    /* The world no longer invents the client's traffic.
+     *
+     * It used to emit one packet per tick along a single road to a single front
+     * door, because there was only one road and only one door. Now the choice of
+     * server IS the interesting part, so the packet has to leave from the model,
+     * which is the only thing that knows which server was picked — see
+     * `pickInitiator`. The lamps here just follow the application's activity. */
+    writeGlow = Math.max(writeGlow, sim.clients.activity * (k.insertsPerSec > 0 ? 1 : 0))
+    readGlow = Math.max(readGlow, sim.clients.activity * (k.selectsPerSec > 0 ? 1 : 0))
 
     writeGlow = damp(writeGlow, 0.12, 3.2, dt)
     readGlow = damp(readGlow, 0.12, 3.2, dt)

@@ -159,6 +159,18 @@ export type InsertQuorum = 'none' | 'one' | 'majority' | 'all'
 /** Which replicas a distributed SELECT reads from. */
 export type LoadBalancing = 'random' | 'nearest_hostname' | 'in_order' | 'round_robin'
 
+/**
+ * How the APPLICATION picks which server to connect to. This is not a
+ * ClickHouse setting — it is a property of the driver's configuration or of the
+ * load balancer in front of the cluster, and it decides which server becomes
+ * the initiator of each statement.
+ *
+ * `single` is the one worth watching: it is what you get from one hostname in a
+ * connection string, and it makes one server do every fan-out and every result
+ * merge in the cluster while the other three only ever serve their own shard.
+ */
+export type ClientBalancing = 'round_robin' | 'random' | 'single'
+
 export interface Knobs {
   /** INSERT statements per second offered by the clients. */
   insertsPerSec: number
@@ -182,6 +194,8 @@ export interface Knobs {
   /** `wait_for_async_insert` — does the client block until the part is written? */
   waitForAsyncInsert: boolean
 
+  /** How the application picks the server it connects to — not a server setting. */
+  clientBalancing: ClientBalancing
   distributedInsert: DistributedInsertMode
   insertQuorum: InsertQuorum
   loadBalancing: LoadBalancing
@@ -239,6 +253,7 @@ export const DEFAULT_KNOBS: Knobs = {
   asyncInsertBusyTimeoutMs: 200,
   waitForAsyncInsert: true,
 
+  clientBalancing: 'round_robin',
   distributedInsert: 'background',
   insertQuorum: 'none',
   loadBalancing: 'random',
@@ -445,7 +460,14 @@ export interface CacheSim {
  */
 export interface QuerySim {
   id: number
+  /** The server doing this piece of the reading. */
   node: number
+  /**
+   * The server the client connected to, which fanned this query out and will
+   * merge the partial results. Equal to `node` for the initiator's own share of
+   * the work — a server reads its own shard as well as asking the others.
+   */
+  initiator: number
   table: number
   active: boolean
   sql: string
@@ -620,28 +642,77 @@ export interface NodeSim {
   blocksWritten: number
   /** 0..1 CPU heat. */
   cpu: number
+  /**
+   * This server's own `Distributed` table. Every server has one; whether it is
+   * currently acting as an initiator depends only on where the clients pointed.
+   */
+  distributed: DistributedSim
 }
 
 /* ---------------------------------------------------------------------------
- * The Distributed initiator.
+ * The Distributed table — ONE PER SERVER.
+ *
+ * `Distributed` is a table engine, not a machine. `CREATE TABLE … ENGINE =
+ * Distributed(cluster, db, local_table, key)` is executed on every server in
+ * the cluster, so every server has the table, every server knows the whole
+ * cluster from `system.clusters`, and every server can serve the query. The
+ * server that becomes the INITIATOR of a query is simply the one the client
+ * happened to connect to; it fans the query out to one replica per shard,
+ * merges what comes back, and answers. The next query can be initiated by a
+ * different server, and usually is.
+ *
+ * This state is therefore per node. `nodes[i].distributed` is server `i`'s own
+ * copy of the table, its own spool directory on its own disk, and its own share
+ * of the result-merging work.
  * -------------------------------------------------------------------------*/
 
 export interface DistributedSim {
-  /** Blocks waiting in `data/<cluster>/<shard>/` for a background flush. */
+  /**
+   * Blocks waiting in `data/<cluster>/shard<N>_replica<M>/` for a background
+   * flush — on THIS server's disk. Indexed by shard.
+   */
   pendingBlocks: number[]
   pendingBytes: number[]
-  /** Which shard the last INSERT hashed to. */
+  /** Which shard the last INSERT through this server hashed to. */
   lastShard: number
-  /** Cumulative rows routed to each shard — the skew story. */
+  /** Cumulative rows this server routed to each shard — the skew story. */
   rowsToShard: number[]
   /** Reads in flight to each shard, and which replica each one picked. */
   readShard: number[]
-  /** How many SELECTs the initiator is currently fanning out. */
+  /** How many SELECTs this server is currently fanning out as initiator. */
   fanOut: number
-  /** Rows the initiator has merged from partial results. */
+  /** Rows this server has merged from other shards' partial results. */
   rowsMerged: number
-  /** Bytes read from remote shards. */
+  /** Bytes this server has read from remote shards. */
   bytesFromRemote: number
+  /** SELECTs the application has initiated here since boot. */
+  queriesInitiated: number
+  /** INSERTs the application has initiated here since boot. */
+  insertsInitiated: number
+  /** 0..1 activity. */
+  activity: number
+}
+
+/* ---------------------------------------------------------------------------
+ * The application tier.
+ *
+ * The clients are not part of the cluster and hold no data. Their one decision
+ * is which server to open a connection to, and that decision is what makes
+ * that server the initiator. A driver with four hostnames in it spreads the
+ * initiator role; a driver with one hostname — or one load balancer that always
+ * picks the same backend — makes one server do all the fan-out and all the
+ * result merging for the whole cluster.
+ * -------------------------------------------------------------------------*/
+
+export interface ClientsSim {
+  /** The server the last INSERT was sent to. */
+  lastInsertTarget: number
+  /** The server the last SELECT was sent to. */
+  lastSelectTarget: number
+  /** Statements the application has sent to each server since boot. */
+  sentToNode: number[]
+  /** Servers the driver currently believes it can reach. */
+  reachable: number
   /** 0..1 activity. */
   activity: number
 }
@@ -693,7 +764,12 @@ export interface SimState {
   tables: TableDef[]
   nodes: NodeSim[]
   keepers: KeeperSim[]
-  distributed: DistributedSim
+  /**
+   * The application tier. There is no `distributed` here on purpose: the
+   * `Distributed` table is not a place in the cluster, it is a table on each
+   * server, and it lives at `nodes[i].distributed`.
+   */
+  clients: ClientsSim
   stats: SimStats
   /** Monotonic query id, so the world can tell one SELECT from the next. */
   nextQueryId: number
@@ -790,7 +866,8 @@ export interface Bus {
 
 export type DistrictId =
   | 'clients'
-  | 'distributed'
+  // No 'distributed'. The `Distributed` table is not a district — it is a table
+  // on every server, and its components belong to the island they stand on.
   | 'nodes'
   | 'storage'
   | 'merges'

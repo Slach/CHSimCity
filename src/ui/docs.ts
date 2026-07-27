@@ -1,5 +1,5 @@
 import { INDEX_GRANULARITY, N_NODES, N_READ_THREADS } from '../core/types'
-import type { ComponentDoc } from '../core/types'
+import type { ComponentDoc, NodeSim, SimState } from '../core/types'
 import { N_TABLES, TABLES, streamCount } from '../world/layout'
 import { fmtBytes, fmtNum } from '../core/util'
 
@@ -23,6 +23,29 @@ function acrossPrimaries(pick: (i: number) => number): number {
   let n = 0
   for (let i = 0; i < N_NODES; i += 2) n += pick(i)
   return n
+}
+
+/** Sum a per-node value across every server. */
+function sumNodes(s: SimState, pick: (n: NodeSim) => number): number {
+  let total = 0
+  for (const n of s.nodes) total += pick(n)
+  return total
+}
+
+/**
+ * How the application's statements are spread over the servers, as the share
+ * held by the busiest one. With a driver that knows the cluster this sits near
+ * `1/N`; with one hostname in a connection string it is 100%.
+ */
+function statementShare(s: SimState): string {
+  let total = 0
+  let worst = 0
+  for (const v of s.clients.sentToNode) {
+    total += v
+    if (v > worst) worst = v
+  }
+  if (total <= 0) return '—'
+  return `${((worst / total) * 100).toFixed(0)}% on the busiest`
 }
 
 export const DOCS: ComponentDoc[] = [
@@ -69,7 +92,7 @@ Three distortions are deliberate. **Time is stretched** for anything sub-second 
       { label: 'Mark cache', get: (s) => `${s.stats.markCacheHitPct.toFixed(1)}%` },
     ],
     knobs: ['insertsPerSec', 'insertBlockRows', 'selectsPerSec', 'timeScale'],
-    see: ['dist', 'node.yard', 'node.merges', 'keeper.ensemble'],
+    see: ['node.dist', 'node.yard', 'node.merges', 'keeper.ensemble'],
     refs: {
       docs: [
         { label: 'ClickHouse — MergeTree engine', url: 'https://clickhouse.com/docs/engines/table-engines/mergetree-family/mergetree' },
@@ -115,7 +138,7 @@ Turn it on in the console and watch the part count collapse. Then read what \`wa
       { label: 'Rows / s written', get: (s) => fmtNum(s.stats.insertRowsPerSec) },
     ],
     knobs: ['insertsPerSec', 'insertBlockRows', 'selectsPerSec', 'asyncInsert'],
-    see: ['dist', 'node.insertdock'],
+    see: ['node.dist', 'node.insertdock'],
     refs: {
       docs: [
         { label: 'ClickHouse — Selecting an insert strategy', url: 'https://clickhouse.com/docs/best-practices/selecting-an-insert-strategy' },
@@ -128,30 +151,38 @@ Turn it on in the console and watch the part count collapse. Then read what \`wa
    * Distributed
    * ====================================================================*/
   {
-    id: 'dist',
+    id: 'node.dist',
     title: 'Distributed',
-    subtitle: 'the initiator — it stores nothing and routes everything',
-    tldr: 'A router with a query rewriter. No data lives here.',
+    subtitle: 'the table the clients connect to — every server has one',
+    tldr: 'A router with a query rewriter, on every server. No data lives in it.',
     sections: [
       {
-        heading: 'What it actually is',
+        heading: 'It is a table, not a node',
         body: `\`CREATE TABLE hits_dist AS hits ENGINE = Distributed(cluster, db, hits, sipHash64(UserID))\`.
 
-That is a view over a cluster, and it holds no rows. On **INSERT** it evaluates the sharding expression per row, splits the block, and sends each piece to one replica of the target shard. On **SELECT** it rewrites the query for one replica of each shard, sends it, and merges the partial results here.
+That DDL runs on **every server in the cluster**. All four have the table, all four read the same \`system.clusters\`, and all four can answer the question — which is why there is one of these strips on each island rather than one initiator district between the clients and the shards.
 
-Everything the initiator does is visible on this district: the **hash wheel** is the sharding expression, the two **silos** are the background spool, and the **merge floor** is where partial results are combined.`,
+The table holds no rows. On **INSERT** it evaluates the sharding expression per row, splits the block, and sends each piece to one replica of the target shard. On **SELECT** it rewrites the query for one replica of each shard, sends it, and merges the partial results.`,
+      },
+      {
+        heading: 'The initiator is whichever server the client called',
+        body: `There is no designated router. The server that becomes the **initiator** of a statement is simply the one the application opened a connection to; it fans the statement out, merges what comes back, and answers. The next statement can be initiated by a different server, and with a driver that knows the cluster it usually is.
+
+So the initiator role is a property of your *connection string*, not of your topology. Put one hostname in it and one server does every fan-out and every result merge for the whole cluster, while the other three only ever read their own shard — with the data distributed exactly the same either way. Move the **client connects to** dial and watch the initiated share on each island change while nothing about the data does.
+
+Note also what does **not** cross the network: a server reading its own shard has no hop to make, which is why \`prefer_localhost_replica\` is on by default.`,
       },
       {
         heading: 'Background insert: the part people get wrong',
-        body: `With the default \`distributed_foreground_insert = 0\`, an INSERT into a \`Distributed\` table returns as soon as the block is written to the **initiator's own disk**, under \`data/<cluster>/shard<N>_replica<M>/\`. A background thread forwards it afterwards.
+        body: `With the default \`distributed_foreground_insert = 0\`, an INSERT into a \`Distributed\` table returns as soon as the block is written to **the local disk of the server the client reached**, under \`data/<cluster>/shard<N>_replica<M>/\`. A background thread forwards it afterwards.
 
-Look at the silos. Whatever is in them is data the client has been told was accepted and which no shard has yet seen. If the initiator's disk dies, that data is gone.
+Look at the silos on each island. Whatever is in them is data that client has been told was accepted and which no shard has yet seen. If that server's disk dies, that data is gone — and *which* server was holding it is decided by which one the client happened to connect to.
 
 Set it to \`foreground\` and the INSERT waits for every shard. Slower, and the only mode in which the client learns that a shard is down.`,
       },
       {
         heading: 'A SELECT only ever reaches one replica per shard',
-        body: `The initiator picks a replica per shard according to \`load_balancing\` and sends the rewritten query there. Two shards means two remote queries, and this node merges their partial results.
+        body: `The initiator picks a replica per shard according to \`load_balancing\` and sends the rewritten query there. Two shards means two remote queries — one of which is usually local — and the initiator merges their partial results.
 
 That is also the trap: with \`load_balancing = random\`, a replica that is lagging by an hour is just as likely to be chosen as one that is current. \`max_replica_delay_for_distributed_queries\` closes that hole and is **not** set by default.
 
@@ -161,18 +192,28 @@ That is also the trap: with \`load_balancing = random\`, a replica that is laggi
         heading: 'What the model simplifies',
         body: `The real engine splits a block by evaluating the sharding expression **per row** and honours per-shard weights. Here the block is split evenly with a deterministic lean that follows the hash, which is enough to make the skew argument honestly but is not a per-row evaluation.
 
-Connection pooling, \`prefer_localhost_replica\` and the retry logic behind \`Code: 279\` are not modelled.`,
+The application's choice of server is modelled as a driver policy — round robin, random, or one hostname — with failover when a server is down. Real deployments often put a TCP load balancer in front instead, and real drivers do their own health checking and backoff; neither is modelled, and nor is connection pooling or the retry logic behind \`Code: 279\`.`,
       },
     ],
     metrics: [
-      { label: 'Fan-out', get: (s) => String(s.distributed.fanOut) },
-      { label: 'Spooled blocks', get: (s) => String(s.distributed.pendingBlocks.reduce((a, b) => a + b, 0)) },
-      { label: 'Spooled bytes', get: (s) => fmtBytes(s.distributed.pendingBytes.reduce((a, b) => a + b, 0)) },
-      { label: 'Rows merged', get: (s) => fmtNum(s.distributed.rowsMerged) },
-      { label: 'From remote', get: (s) => fmtBytes(s.distributed.bytesFromRemote) },
+      {
+        label: 'Initiating now',
+        get: (s) => `${s.nodes.filter((n) => n.distributed.fanOut > 0).length} of ${N_NODES} servers`,
+      },
+      { label: 'Statement spread', get: (s) => statementShare(s) },
+      {
+        label: 'Spooled blocks',
+        get: (s) => String(sumNodes(s, (n) => n.distributed.pendingBlocks.reduce((a, b) => a + b, 0))),
+      },
+      {
+        label: 'Spooled bytes',
+        get: (s) => fmtBytes(sumNodes(s, (n) => n.distributed.pendingBytes.reduce((a, b) => a + b, 0))),
+      },
+      { label: 'Rows merged', get: (s) => fmtNum(sumNodes(s, (n) => n.distributed.rowsMerged)) },
+      { label: 'From remote', get: (s) => fmtBytes(sumNodes(s, (n) => n.distributed.bytesFromRemote)) },
     ],
-    knobs: ['distributedInsert', 'loadBalancing', 'parallelReplicas', 'insertQuorum'],
-    see: ['dist.shardhash', 'dist.spool', 'node.queue'],
+    knobs: ['clientBalancing', 'distributedInsert', 'loadBalancing', 'parallelReplicas', 'insertQuorum'],
+    see: ['node.wheel', 'node.spool', 'node.resultmerge', 'clients', 'node.queue'],
     refs: {
       docs: [
         { label: 'ClickHouse — Distributed table engine', url: 'https://clickhouse.com/docs/engines/table-engines/special/distributed' },
@@ -184,7 +225,7 @@ Connection pooling, \`prefer_localhost_replica\` and the retry logic behind \`Co
   },
 
   {
-    id: 'dist.shardhash',
+    id: 'node.wheel',
     title: 'The sharding key',
     subtitle: 'sipHash64(key) % shards — where every row goes',
     tldr: 'One expression decides your data distribution for the life of the table.',
@@ -209,18 +250,18 @@ Hash the column your queries actually group by, unless it is skewed. Then hash a
       },
     ],
     metrics: [
-      { label: 'Shard 1 rows', get: (s) => fmtNum(s.distributed.rowsToShard[0]) },
-      { label: 'Shard 2 rows', get: (s) => fmtNum(s.distributed.rowsToShard[1]) },
+      { label: 'Shard 1 rows', get: (s) => fmtNum(s.nodes[0].distributed.rowsToShard[0]) },
+      { label: 'Shard 2 rows', get: (s) => fmtNum(s.nodes[0].distributed.rowsToShard[1]) },
       {
         label: 'Skew',
         get: (s) => {
-          const t = s.distributed.rowsToShard[0] + s.distributed.rowsToShard[1]
+          const t = s.nodes[0].distributed.rowsToShard[0] + s.nodes[0].distributed.rowsToShard[1]
           if (t <= 0) return '—'
-          return `${((Math.abs(s.distributed.rowsToShard[0] - s.distributed.rowsToShard[1]) / t) * 100).toFixed(1)}%`
+          return `${((Math.abs(s.nodes[0].distributed.rowsToShard[0] - s.nodes[0].distributed.rowsToShard[1]) / t) * 100).toFixed(1)}%`
         },
       },
     ],
-    see: ['dist', 'dist.clusters'],
+    see: ['node.dist', 'node.clusters'],
     refs: {
       docs: [
         { label: 'ClickHouse — Distributed, sharding_key', url: 'https://clickhouse.com/docs/engines/table-engines/special/distributed#distributed-clusters' },
@@ -229,7 +270,7 @@ Hash the column your queries actually group by, unless it is skewed. Then hash a
   },
 
   {
-    id: 'dist.spool',
+    id: 'node.spool',
     title: 'Background insert spool',
     subtitle: 'blocks on the initiator’s own disk, not yet in any shard',
     tldr: 'In background mode an INSERT is durable on the initiator, not on the shard.',
@@ -254,19 +295,19 @@ What is never right is background mode without that monitoring.`,
       },
     ],
     metrics: [
-      { label: 'Shard 1 blocks', get: (s) => String(s.distributed.pendingBlocks[0]) },
-      { label: 'Shard 2 blocks', get: (s) => String(s.distributed.pendingBlocks[1]) },
-      { label: 'At risk', get: (s) => fmtBytes(s.distributed.pendingBytes.reduce((a, b) => a + b, 0)) },
+      { label: 'Shard 1 blocks', get: (s) => String(s.nodes[0].distributed.pendingBlocks[0]) },
+      { label: 'Shard 2 blocks', get: (s) => String(s.nodes[0].distributed.pendingBlocks[1]) },
+      { label: 'At risk', get: (s) => fmtBytes(sumNodes(s, (n) => n.distributed.pendingBytes.reduce((a, b) => a + b, 0))) },
     ],
     knobs: ['distributedInsert', 'nodeDown', 'keeperConnected'],
-    see: ['dist'],
+    see: ['node.dist'],
     refs: {
       systemTables: [{ label: 'system.distribution_queue' }],
     },
   },
 
   {
-    id: 'dist.merge',
+    id: 'node.resultmerge',
     title: 'Result merge',
     subtitle: 'partial results from every shard, combined here',
     tldr: 'Only the initiator ever sees the whole answer.',
@@ -289,15 +330,15 @@ This is the argument for keeping shards balanced that has nothing to do with dis
       },
     ],
     metrics: [
-      { label: 'Rows merged', get: (s) => fmtNum(s.distributed.rowsMerged) },
-      { label: 'From remote', get: (s) => fmtBytes(s.distributed.bytesFromRemote) },
+      { label: 'Rows merged', get: (s) => fmtNum(sumNodes(s, (n) => n.distributed.rowsMerged)) },
+      { label: 'From remote', get: (s) => fmtBytes(sumNodes(s, (n) => n.distributed.bytesFromRemote)) },
       { label: 'Mean query', get: (s) => `${s.stats.meanQueryMs.toFixed(0)} ms` },
     ],
-    see: ['dist', 'node.readpool'],
+    see: ['node.dist', 'node.readpool'],
   },
 
   {
-    id: 'dist.clusters',
+    id: 'node.clusters',
     title: 'system.clusters',
     subtitle: 'the cluster definition, as the server sees it',
     tldr: 'Which hosts exist, in which shard, and whether they are reachable.',
@@ -327,7 +368,7 @@ That is the failure mode \`max_replica_delay_for_distributed_queries\` exists fo
       { label: 'Worst lag', get: (s) => `${s.stats.maxReplicaDelay.toFixed(1)} s` },
     ],
     knobs: ['nodeDown', 'loadBalancing', 'slowReplica'],
-    see: ['dist', 'node.queue'],
+    see: ['node.dist', 'node.queue'],
     refs: { systemTables: [{ label: 'system.clusters' }, { label: 'system.replicas' }] },
   },
 
@@ -1295,7 +1336,7 @@ Quorum inserts, \`ATTACH_PART\` and part-checksum verification on fetch are not 
       { label: 'Worst delay', get: (s) => `${s.stats.maxReplicaDelay.toFixed(1)} s` },
     ],
     knobs: ['slowReplica', 'keeperConnected', 'nodeDown', 'networkLatencyMs', 'insertQuorum'],
-    see: ['keeper.ensemble', 'keeper.log', 'node.merges', 'dist.clusters'],
+    see: ['keeper.ensemble', 'keeper.log', 'node.merges', 'node.clusters'],
     refs: {
       docs: [
         { label: 'ClickHouse — Data replication', url: 'https://clickhouse.com/docs/engines/table-engines/mergetree-family/replication' },

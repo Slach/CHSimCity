@@ -270,6 +270,21 @@ export const KNOB_META: KnobMeta[] = [
     hint: 'Split ONE shard’s mark ranges across its replicas, so both read a share instead of one reading all of it. The only setting here that changes how much work a shard does.',
   },
   {
+    key: 'clientBalancing',
+    label: 'client connects to',
+    // Deliberately no `setting`: this is not a ClickHouse setting. It is the
+    // driver's configuration — or the load balancer in front of the cluster —
+    // and it is what decides which server initiates each statement.
+    group: 'read',
+    kind: 'select',
+    options: [
+      { value: 'round_robin', label: 'every server in turn' },
+      { value: 'random', label: 'a random server' },
+      { value: 'single', label: 'one server — one hostname' },
+    ],
+    hint: 'Which server the application opens a connection to. That server becomes the initiator: it fans the statement out to the shards and merges what comes back. One hostname in a connection string makes one machine do all of that for the whole cluster, with the data distributed exactly the same.',
+  },
+  {
     key: 'loadBalancing',
     label: 'load_balancing',
     setting: 'load_balancing',

@@ -166,10 +166,25 @@ describe('the cluster plan', () => {
     }
   })
 
-  it('the client terminal and the initiator are north of every island', () => {
+  it('the client terminal is north of every island', () => {
     for (let n = 0; n < N_NODES; n++) {
       expect(ANCHOR.clientTerminal[2]).toBeLessThan(nodeOrigin(n)[2] - CITY.node.d / 2)
-      expect(ANCHOR.distributed[2]).toBeLessThan(nodeOrigin(n)[2] - CITY.node.d / 2)
+    }
+  })
+
+  it('has no cluster-scale anchor for Distributed, because there is no such place', () => {
+    // `Distributed` is a table on every server, created by DDL that runs on all
+    // of them. A cluster anchor for it would put the single-initiator geography
+    // — which is simply wrong — straight back into the plan.
+    expect(Object.keys(ANCHOR)).not.toContain('distributed')
+  })
+
+  it('puts every server’s Distributed table on the face the clients are on', () => {
+    // North of the insert dock, so the client arrives at the table and the table
+    // hands the block to the writer — the order the code runs in.
+    expect(LOCAL.distTable[2]).toBeLessThan(LOCAL.insertDock[2])
+    for (const key of ['distTable', 'shardWheel', 'clustersBoard', 'insertSpool', 'resultMerge'] as const) {
+      expect(LOCAL[key][2], `${key} should be on the north face`).toBeLessThan(0)
     }
   })
 
@@ -196,12 +211,19 @@ describe('the route network', () => {
   })
 
   it('every route id the simulation emits on exists', () => {
-    const ids: string[] = [rid.clientInsert, rid.clientSelect, rid.clientResult]
+    const ids: string[] = []
+    for (let from = 0; from < N_NODES; from++) {
+      // Every server can be an initiator, so every ordered pair has to be a
+      // real duct — the fan-out is not one node's job.
+      for (let to = 0; to < N_NODES; to++) {
+        if (from === to) continue
+        ids.push(rid.fanInsert(from, to), rid.fanQuery(from, to), rid.fanResult(from, to))
+      }
+    }
     for (let n = 0; n < N_NODES; n++) {
       ids.push(
-        rid.shardInsert(n),
-        rid.shardQuery(n),
-        rid.shardResult(n),
+        rid.clientToNode(n),
+        rid.nodeToClient(n),
         rid.sortBlock(n),
         rid.writeColumns(n),
         rid.commitPart(n),

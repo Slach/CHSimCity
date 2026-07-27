@@ -414,7 +414,7 @@ export const SCENARIOS: ScenarioDef[] = [
       selectsPerSec: 10,
       loadBalancing: 'random',
     },
-    focus: 'dist.shardhash',
+    focus: 'node.0.wheel',
     duration: 90,
     beats: [
       [

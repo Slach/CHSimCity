@@ -57,35 +57,42 @@ network calls.
 3. **The model must be honest.** Preserve real algorithms and formulas, scale only
    what is necessary for observation, and state material simplifications in the
    component's own doc, not only in the README.
-4. **Colour is semantic and never decorative.** A part's colour IS its
+4. **`Distributed` is a table on every server, never a place.** The DDL runs on
+   all of them, so all of them have it and any of them can be the initiator —
+   the one the client connected to. `nodes[i].distributed` is server `i`'s copy;
+   there is no `state.distributed`, no `distributed` district and no cluster
+   anchor for one, and `test/layout.test.ts` enforces that. Which server
+   initiates is the *application's* choice, which is why the establishing shot
+   stands behind the clients: that is where the decision is made.
+5. **Colour is semantic and never decorative.** A part's colour IS its
    `system.parts.state`; nothing else may use those five values. Do not reuse a
    mechanism's colour because it looks good.
-5. **Meaning controls appearance.** Night uses matte structure and neon meaning
+6. **Meaning controls appearance.** Night uses matte structure and neon meaning
    and only emissive above the bloom threshold glows. Day is a separate rendering
    model, not the night one with the exposure raised.
-6. **Frame loops allocate nothing.** Reuse vectors, colours, matrices and scratch
+7. **Frame loops allocate nothing.** Reuse vectors, colours, matrices and scratch
    objects. Visual richness is not permission to make the renderer collect
    garbage.
-7. **Geometry is a factual claim.** A building can teach a falsehood more
+8. **Geometry is a factual claim.** A building can teach a falsehood more
    persuasively than nearby text teaches the truth. Review the rendered result,
    not only the source coordinates.
-8. **No silent caps.** If a visualisation bounds what it draws, the counters must
+9. **No silent caps.** If a visualisation bounds what it draws, the counters must
    still report the truth. The parts yard is a *window*, not a limit: a part
    beyond it has `slot === -1`, is fully simulated, and is skipped by the world.
-9. **A shortcut is a physical key.** Bind through `physicalKey(e)` from
-   `ui/uikit.ts`, never `e.key`. `e.key` is the character the LAYOUT produces, so
-   on a Cyrillic keyboard `F` arrives as `а` and `/` as `.`, and every shortcut
-   written against it silently ceases to exist — with no error and nothing in the
-   console. That is how fly, the tour, the palette, pause, reset and the theme
-   toggle were all dead for a Russian-layout visitor while WASD kept working,
-   because the camera rig alone was already switching on `e.code`.
-10. **A toggle is resolved by its sender.** `camera:mode` is a command — "be in
+10. **A shortcut is a physical key.** Bind through `physicalKey(e)` from
+    `ui/uikit.ts`, never `e.key`. `e.key` is the character the LAYOUT produces,
+    so on a Cyrillic keyboard `F` arrives as `а` and `/` as `.`, and every
+    shortcut written against it silently ceases to exist — with no error and
+    nothing in the console. That is how fly, the tour, the palette, pause, reset
+    and the theme toggle were all dead for a Russian-layout visitor while WASD
+    kept working, because the camera rig alone already switched on `e.code`.
+11. **A toggle is resolved by its sender.** `camera:mode` is a command — "be in
     this mode" — and the listener ignores a request for the mode it is already
     in, which is what stops it echoing the rig's own announcement. So F has to
     decide `fly` or `orbit` itself. A toggle expression inside that listener is
     unreachable, and the one that used to be there meant fly mode could be
     entered and never left.
-11. **A closed overlay must be `display: none`, not merely transparent.** An
+12. **A closed overlay must be `display: none`, not merely transparent.** An
     author `display` beats the UA's `[hidden]` rule, so `.pal-overlay` and
     `.help` — `position: fixed`, `inset: 0`, `pointer-events: auto` — stayed
     hit-testable at `opacity: 0` and swallowed every click in the application
@@ -93,7 +100,7 @@ network calls.
     3D scene. The `[hidden] { display: none !important }` reset in `tokens.css`
     is what makes `hidden` mean hidden; `test/overlays.test.ts` guards it. Verify
     a control with `document.elementFromPoint`, never by emitting its bus event.
-12. **A map with a uniform projection owns its aspect ratio.** The minimap
+13. **A map with a uniform projection owns its aspect ratio.** The minimap
     canvas cannot be given an arbitrary CSS box: it does not stretch to fit, it
     surrounds the plan with empty ground. `test/minimap.test.ts` holds the
     stylesheet to the extent computed from `world/layout.ts`.

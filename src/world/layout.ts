@@ -131,6 +131,24 @@ export function nodeLocal(node: number, lx: number, ly: number, lz: number): [nu
  * ------------------------------------------------------------------------*/
 
 export const LOCAL = {
+  /* --- the Distributed table, on the island's north face ------------------
+   * Every server has one, so it is drawn on every island, and it faces the
+   * application tier because that is the direction clients arrive from. This
+   * row is the server's front door: the client connects here, this is where the
+   * sharding expression is evaluated, this is whose disk the spool sits on, and
+   * this is where the partial results are merged back into an answer. */
+
+  /** The `Distributed` table itself — the port the client connects to. */
+  distTable: [0, 0, -97],
+  /** The sharding-expression hash wheel. */
+  shardWheel: [-40, 0, -97],
+  /** `system.clusters` — this server's view of the cluster definition. */
+  clustersBoard: [40, 0, -97],
+  /** `data/<cluster>/shard<N>_replica<M>/` — the background insert spool. */
+  insertSpool: [-92, 0, -95],
+  /** Where partial results from the other shards are merged into an answer. */
+  resultMerge: [92, 0, -95],
+
   /** Where an INSERT block lands: MergeTreeDataWriter's dock. */
   insertDock: [0, 0, -78],
   /** The sort table: the block is sorted by the ORDER BY key here. */
@@ -177,18 +195,14 @@ export function anchorAt(node: number, id: LocalAnchorId): [number, number, numb
 
 export const ANCHOR = {
   clusterCenter: [0, 8, 20],
-  /** The application tier, outside the cluster. */
+  /**
+   * The application tier, outside the cluster.
+   *
+   * There is deliberately no `distributed` anchor beside it. `Distributed` is a
+   * table on every server, not a place between the clients and the shards, and
+   * an anchor here would put it back. It lives in `LOCAL`, four times over.
+   */
   clientTerminal: [0, 6, -430],
-  /** The `Distributed` table: the only node the clients ever talk to. */
-  distributed: [0, 0, -300],
-  /** The sharding-key hash wheel on the initiator's deck. */
-  shardHash: [0, 12, -312],
-  /** `data/<cluster>/shard<N>_replica<M>/` — the background insert spool. */
-  insertSpool: [-64, 0, -292],
-  /** Where partial results from the shards are merged back together. */
-  resultMerge: [64, 0, -292],
-  /** `system.clusters` — the cluster definition board. */
-  clustersBoard: [0, 0, -344],
   /** The Keeper ensemble. */
   keeper: [0, 0, 330],
   keeperLeader: [0, 0, 306],
@@ -695,14 +709,26 @@ function route(
 }
 
 export const rid = {
-  /** client → the Distributed initiator */
-  clientInsert: 'client.insert',
-  clientSelect: 'client.select',
-  clientResult: 'client.result',
-  /** initiator → one shard, and the ack back */
-  shardInsert: (node: number) => `dist.insert.${node}`,
-  shardQuery: (node: number) => `dist.query.${node}`,
-  shardResult: (node: number) => `dist.result.${node}`,
+  /**
+   * client → one server, and the answer back.
+   *
+   * Four of each, because the application chooses which server to connect to
+   * and that server becomes the initiator of its statement. A single road to a
+   * single front door would be a picture of a cluster that does not exist.
+   */
+  clientToNode: (node: number) => `client.to.${node}`,
+  nodeToClient: (node: number) => `client.from.${node}`,
+  /**
+   * server → server, for every ordered pair. Three families along one duct,
+   * because a forwarded INSERT block, a fanned-out SELECT and a partial result
+   * coming home really do share one connection pool between two machines — but
+   * each keeps its own colour, and colour here is never decorative.
+   *
+   * Only one of the three draws the road, so the pair reads as a single cable.
+   */
+  fanInsert: (from: number, to: number) => `fan.insert.${from}.${to}`,
+  fanQuery: (from: number, to: number) => `fan.query.${from}.${to}`,
+  fanResult: (from: number, to: number) => `fan.result.${from}.${to}`,
   /** inside one node: the write path */
   sortBlock: (node: number) => `node.sort.${node}`,
   writeColumns: (node: number) => `node.write.${node}`,
@@ -726,95 +752,107 @@ export const rid = {
   fetchPart: (from: number, to: number) => `fetch.${from}.${to}`,
 } as const
 
-/* --- clients --------------------------------------------------------------
- * The application tier talks to exactly one thing: the `Distributed` table. It
- * has no idea how many shards there are, which is the entire point of the
- * engine, so this road stops at the initiator and never continues. */
-
-route(
-  rid.clientInsert,
-  [
-    [-26, 4, ANCHOR.clientTerminal[2] + 22],
-    [-26, 4, -390],
-    [-14, 4, -340],
-    [ANCHOR.distributed[0] - 8, 4, ANCHOR.distributed[2] - 18],
-  ],
-  { color: COLOR.client, speed: 120, size: 1.4, visible: true, roadOpacity: 0.18 },
-)
-
-route(
-  rid.clientSelect,
-  [
-    [26, 4, ANCHOR.clientTerminal[2] + 22],
-    [26, 4, -390],
-    [14, 4, -340],
-    [ANCHOR.distributed[0] + 8, 4, ANCHOR.distributed[2] - 18],
-  ],
-  { color: COLOR.reader, speed: 130, size: 1.2, visible: true, roadOpacity: 0.16 },
-)
-
-route(
-  rid.clientResult,
-  [
-    [ANCHOR.distributed[0] + 14, 6, ANCHOR.distributed[2] - 20],
-    [20, 6, -344],
-    [34, 6, -392],
-    [34, 6, ANCHOR.clientTerminal[2] + 22],
-  ],
-  { color: COLOR.ok, speed: 150, size: 1.0 },
-)
-
-/* --- the initiator's fan-out ---------------------------------------------
- * One duct per data node, leaving the initiator's south face. INSERTs go to
- * ONE replica of one shard and are replicated from there; SELECTs go to one
- * replica per shard. Both use the same metal, which is true — it is one
- * connection pool. */
+/* --- clients → every server ----------------------------------------------
+ * The application tier has four roads out of it, one to each server's
+ * `Distributed` table, because choosing which one to use is the application's
+ * only decision and the thing that decides which server initiates.
+ *
+ * The clients still know nothing about shards — no road from here reaches a
+ * parts yard. What changed is that the front door is not a place of its own:
+ * there are four of them, one on each machine. */
 
 for (let n = 0; n < N_NODES; n++) {
-  const o = nodeOrigin(n)
-  const dockW = anchorAt(n, 'insertDock')
-  const west = shardOf(n) === 0
-  const lane = west ? -1 : 1
-  // The two replicas of one shard leave on slightly different lanes so their
-  // ducts read as two cables in one bank rather than one thick cable.
-  const laneOff = replicaOf(n) === 0 ? 0 : 16 * lane
+  const door = anchorAt(n, 'distTable')
+  const res = anchorAt(n, 'resultMerge')
+  // Statements out on the west lane of the corridor, answers home on the east,
+  // so a busy server reads as two streams rather than one confused one.
+  const lane = 30 + 14 * n
 
   route(
-    rid.shardInsert(n),
+    rid.clientToNode(n),
     [
-      [ANCHOR.distributed[0] + 22 * lane, 7, ANCHOR.distributed[2] + 16],
-      [ANCHOR.distributed[0] + 70 * lane, 7, -262],
-      [o[0] + laneOff, 7, -204],
-      [dockW[0] + laneOff * 0.3, 7, dockW[2] - 30],
-      [dockW[0], 6, dockW[2] - 8],
+      [-26 + n * 17, 4, ANCHOR.clientTerminal[2] + 22],
+      [-26 + n * 17, 4, -392],
+      [door[0] - lane * 0.25, 5, -300],
+      [door[0] - 10, 5, door[2] - 40],
+      [door[0] - 4, 4, door[2] - 10],
     ],
-    { color: COLOR.client, speed: 130, size: 1.3, visible: true, roadOpacity: 0.14 },
+    { color: COLOR.client, speed: 125, size: 1.35, visible: true, roadOpacity: 0.15 },
   )
 
-  const poolW = anchorAt(n, 'readPoolDispatcher')
   route(
-    rid.shardQuery(n),
+    rid.nodeToClient(n),
     [
-      [ANCHOR.distributed[0] + 30 * lane, 10, ANCHOR.distributed[2] + 14],
-      [ANCHOR.distributed[0] + 88 * lane, 10, -258],
-      [o[0] + 60 * lane + laneOff, 10, -196],
-      [poolW[0], 9, poolW[2] - 26],
-      [poolW[0], 7, poolW[2] - 6],
+      [res[0], 6, res[2] - 8],
+      [res[0] + 8, 7, res[2] - 44],
+      [res[0] * 0.4, 7, -300],
+      [40 - n * 17, 6, -392],
+      [40 - n * 17, 6, ANCHOR.clientTerminal[2] + 22],
     ],
-    { color: COLOR.reader, speed: 150, size: 1.15, visible: true, roadOpacity: 0.12 },
+    { color: COLOR.ok, speed: 150, size: 1.0 },
   )
+}
 
-  const resW = anchorAt(n, 'readPool')
-  route(
-    rid.shardResult(n),
-    [
-      [resW[0] + 6, 8, resW[2] + 4],
-      [o[0] + 78 * lane + laneOff, 12, -190],
-      [ANCHOR.resultMerge[0] + 40 * lane, 12, -252],
-      [ANCHOR.resultMerge[0], 8, ANCHOR.resultMerge[2]],
-    ],
-    { color: COLOR.ok, speed: 160, size: 1.0 },
-  )
+/* --- server → server: the whole cluster, all to all -----------------------
+ * `system.clusters` is the same on every server, so every server can reach
+ * every other one, and one duct per ordered pair is what that actually looks
+ * like. A forwarded INSERT block, a fanned-out SELECT and a partial result
+ * coming home all travel the same metal — it is one connection pool — and only
+ * their colour distinguishes them.
+ *
+ * The road is drawn once per PAIR, on the from < to direction. Drawing both
+ * would put two lines in the same place, which is not more information, and
+ * the reverse duct still carries flows. */
+
+for (let from = 0; from < N_NODES; from++) {
+  for (let to = 0; to < N_NODES; to++) {
+    if (from === to) continue
+    const a = anchorAt(from, 'distTable')
+    const b = anchorAt(to, 'distTable')
+    const sameShard = shardOf(from) === shardOf(to)
+    // Lift the two cross-shard diagonals so they do not lie on top of the
+    // shard-local pair and the replication ducts underneath them.
+    const y = sameShard ? 9 : 13
+    // Bow the duct away from the straight line, outward from the cluster's
+    // centre, so four ducts through the middle stay four distinguishable ducts.
+    const bow = (dy: number): [number, number, number][] => {
+      const mid: [number, number, number] = [
+        (a[0] + b[0]) / 2 + (sameShard ? (shardOf(from) === 0 ? -34 : 34) : 0),
+        y + dy + 4,
+        (a[2] + b[2]) / 2 - (sameShard ? 0 : 26 + 8 * replicaOf(from)),
+      ]
+      return [
+        [a[0], y + dy, a[2] + 6],
+        [(a[0] + mid[0]) / 2, y + dy + 2, (a[2] + mid[2]) / 2],
+        mid,
+        [(b[0] + mid[0]) / 2, y + dy + 2, (b[2] + mid[2]) / 2],
+        [b[0], y + dy, b[2] + 6],
+      ]
+    }
+
+    // The road belongs to the duct, not to any one of the three things on it,
+    // so exactly one family draws it and only in the from < to direction —
+    // otherwise six cables would be drawn as twelve lines in six places.
+    const drawsRoad = from < to
+
+    route(rid.fanInsert(from, to), bow(0), {
+      color: COLOR.client,
+      speed: 140,
+      size: 1.25,
+      visible: drawsRoad,
+      roadOpacity: drawsRoad ? 0.13 : 0,
+    })
+    route(rid.fanQuery(from, to), bow(1.6), {
+      color: COLOR.reader,
+      speed: 155,
+      size: 1.1,
+    })
+    route(rid.fanResult(from, to), bow(3.2), {
+      color: COLOR.ok,
+      speed: 165,
+      size: 1.0,
+    })
+  }
 }
 
 /* --- inside one node: the write path -------------------------------------

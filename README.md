@@ -5,7 +5,7 @@
 **[slach.github.io/CHSimCity](https://slach.github.io/CHSimCity/)** — it runs in
 the browser, with no server behind it.
 
-Four data nodes, three Keeper nodes, and one `Distributed` table in front of
+Four servers, three Keeper nodes, and a `Distributed` table on every one of
 them. Every structure is one real mechanism: the towers in the middle of each
 island are `system.parts`, and a part's **height is its row count** and its
 **colour is its `system.parts.state`**. The yellow tower to the west is
@@ -79,7 +79,7 @@ anywhere.
 | `?` | Keyboard map and colour legend |
 | `K` or `P` · `,` `.` | Pause · slower / faster |
 | `N` · `R` | Day / night · reset |
-| `1` – `7` | Jump: clients, initiator, the four nodes, Keeper |
+| `1` – `7` | Jump: clients, a `Distributed` table, the four servers, Keeper |
 
 Every shortcut is bound to the **physical key**, not to the character it prints,
 so they all work unchanged on a non-Latin keyboard layout.
@@ -88,8 +88,8 @@ The **minimap** in the bottom-left is a plan drawn from the same numbers the 3D
 scene is built from. Every district is labelled and carries its own colour —
 until a node is in trouble, when it gives that colour up for amber or red, so a
 sick node is visible without flying to it. The cone is where you are and what you
-can see; at the establishing shot you are south of the map and it pins itself to
-the edge. Click a district to fly to it, or the empty ground to pull back out.
+can see; at the establishing shot you are north of the map, behind the clients,
+and it pins itself to the edge. Click a district to fly to it, or the empty ground to pull back out.
 
 ---
 
@@ -100,7 +100,7 @@ The geography is the order things happen in.
 | District | What it is |
 |---|---|
 | **Client terminal** (north, outside) | The application tier. It knows one table name and nothing about shards |
-| **Distributed initiator** | The hash wheel is the sharding key; the silos are the background insert spool; the merge floor is where partial results are combined |
+| **Distributed strip** (on each island) | Not a district — a table on every server. The hash wheel is the sharding key; the silos are that server's own background insert spool; the merge floor is where it combines partial results |
 | **Four islands** | Two shards, two replicas. Each is one ClickHouse server |
 | **Keeper quorum** (south) | Three raft nodes. Metadata only — and every write depends on them |
 
@@ -155,6 +155,11 @@ Keeper, **yellow** the primary index, **aqua** the skip indexes.
   an outage.
 - Turn on **One replica cannot keep up** and watch `absolute_delay` climb while
   the load balancer keeps sending it half your reads.
+- Set **client connects to** to *one server — one hostname* and watch the
+  `Distributed` readout on each island. One server goes to 100% of statements and
+  does every fan-out and every result merge in the cluster; the other three drop
+  to 0% and only ever read their own shard. Nothing about where the *data* lives
+  changed — this is entirely a property of the connection string.
 
 ---
 

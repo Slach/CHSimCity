@@ -74,20 +74,29 @@ const FOCUS_UP_BIAS = 0.436 // 25°
 const PATH_EASE = 0.18
 
 /**
- * The establishing shot.
+ * The establishing shot: BEHIND THE APPLICATION TIER, looking south.
  *
- * From the south and slightly east, looking north up the cluster's own axis, so
- * the geography reads in the order things happen: the client terminal and the
- * Distributed initiator at the top of frame, the four data islands across the
- * middle, and the Keeper quorum nearest the camera.
+ * You arrive where a client arrives. The clients are at z ≈ -430, north of
+ * everything, so the camera sits north of them and looks south down the
+ * cluster's own axis — and the frame then reads in the order things actually
+ * happen: the application tier in the foreground, the four servers across the
+ * middle each with its own `Distributed` table facing you, and the Keeper
+ * quorum furthest away.
+ *
+ * This used to be the other way round, from the Keeper end. That framing put
+ * the clients at the far edge and made the cluster look like something data
+ * flows *out* of, with a single front door between them and the shards. There
+ * is no such door: every server has the `Distributed` table, and which one
+ * serves a statement is the application's choice — which is a fact about this
+ * end of the world, so this is the end to stand at.
  *
  * The distance is derived, not guessed. The built cluster runs z = -470 .. +400,
  * 870 units deep, and at this camera's 52° vertical field of view the vertical
  * extent covered at distance d is 2·d·tan(26°) ≈ 0.98·d — so ~1050 units of
- * distance is what holds 870 with a margin. Pull the camera in and the client
- * terminal leaves the frame; push it out and the islands stop being readable.
+ * distance is what holds 870 with a margin. Pull the camera in and the Keeper
+ * quorum leaves the frame; push it out and the islands stop being readable.
  */
-const HOME_POS = new THREE.Vector3(180, 520, 900)
+const HOME_POS = new THREE.Vector3(-180, 520, -900)
 const HOME_PIVOT = new THREE.Vector3(0, 0, -20)
 
 const CLUSTER_CENTER = new THREE.Vector3(

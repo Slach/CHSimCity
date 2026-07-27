@@ -153,6 +153,12 @@ export function createMinimap(ctx: UiContext): UiModule {
     if (worst >= s.knobs.partsToDelayInsert * 0.8) {
       return { color: cssColor('warn'), why: `${parts} parts`, alert: true }
     }
+    // Blocks this server accepted through its own `Distributed` table and has
+    // not forwarded yet. They are on THIS disk, so a backlog here is this
+    // island's problem and belongs to this island's colour.
+    let spooled = 0
+    for (const b of nd.distributed.pendingBlocks) spooled += b
+    if (spooled > 8) return { color: cssColor('warn'), why: `${spooled} blocks spooled`, alert: true }
     return { color: cssColor('node'), why: `${parts} parts`, alert: false }
   }
 
@@ -232,24 +238,9 @@ export function createMinimap(ctx: UiContext): UiModule {
     const cb = DISTRICT_BOUNDS.clients
     district(g, 'clients', 'CLIENTS', 'Application tier', cb.x[0], cb.z[0], cb.x[1], cb.z[1], cssColor('client'))
 
-    // The initiator warms when it is holding blocks no shard has yet seen —
-    // the one thing about it worth noticing from across the room.
-    let spooled = 0
-    for (const n of s.distributed.pendingBlocks) spooled += n
-    const db = DISTRICT_BOUNDS.distributed
-    district(
-      g,
-      'dist',
-      // 'DISTRIBUTED' does not fit the footprint at this scale, and the word
-      // the operator uses for this node is the shorter one anyway.
-      'INITIATOR',
-      spooled > 0 ? `Distributed — ${spooled} blocks spooled` : 'Distributed initiator',
-      db.x[0],
-      db.z[0],
-      db.x[1],
-      db.z[1],
-      spooled > 8 ? cssColor('warn') : cssColor('distributed'),
-    )
+    // No initiator footprint between the clients and the shards: there is no
+    // such place. `Distributed` is a table on each of the four islands, so the
+    // per-island signal below carries it instead.
 
     /* --- the four islands --------------------------------------------------
      * Drawn after the `nodes` band that contains them and pushed onto the
