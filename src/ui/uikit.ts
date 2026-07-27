@@ -101,6 +101,69 @@ export function setClass(node: Element, cls: string, on: boolean): void {
   if (node.classList.contains(cls) !== on) node.classList.toggle(cls, on)
 }
 
+/* ------------------------------- keyboard -------------------------------- */
+
+/**
+ * Punctuation whose printed character depends on the layout. The name on the
+ * left is the physical key; the character on the right is what it produces on
+ * a US layout, which is what the shortcut tables are written in.
+ */
+const PUNCT_CODES: Record<string, string> = {
+  Slash: '/',
+  Comma: ',',
+  Period: '.',
+  Minus: '-',
+  Equal: '=',
+  BracketLeft: '[',
+  BracketRight: ']',
+  Backquote: '`',
+  Semicolon: ';',
+  Quote: "'",
+  Backslash: '\\',
+}
+
+/**
+ * Which key was physically pressed, independent of the keyboard layout.
+ *
+ * `KeyboardEvent.key` is the CHARACTER the layout produces, not the key. On a
+ * Cyrillic layout the `F` key arrives as `а`, `T` as `е` and `/` as `.`, so
+ * every shortcut written as `e.key === 'f'` silently stops existing — which is
+ * exactly what happened here: fly, the tour, search, pause, reset and the
+ * theme toggle were all dead on any non-Latin layout, while WASD kept working
+ * because `engine/camera.ts` was already switching on `e.code`.
+ *
+ * This returns the US-layout name of the key: an uppercase letter, a digit, or
+ * one of the punctuation characters above. Keys that carry no character at all
+ * — `Escape`, the arrows, `Enter` — are layout-independent already and come
+ * back as their `key` value, so callers can switch on both in one statement.
+ *
+ * `code` is empty on synthetic events and on some IME and virtual keyboards,
+ * so `key` remains the fallback rather than an error.
+ */
+export function physicalKey(e: KeyboardEvent): string {
+  const code = e.code
+  if (code) {
+    if (code.length === 4 && code.startsWith('Key')) return code[3]
+    if (code.length === 6 && code.startsWith('Digit')) return code[5]
+    if (code.length === 7 && code.startsWith('Numpad') && code[6] >= '0' && code[6] <= '9') return code[6]
+    const punct = PUNCT_CODES[code]
+    if (punct !== undefined) return punct
+  }
+  const k = e.key
+  return k.length === 1 ? k.toUpperCase() : k
+}
+
+/**
+ * Is the event going to something the visitor is typing into? A shortcut must
+ * never steal a character from a text field or a `<select>`'s type-ahead.
+ */
+export function isTypingTarget(t: EventTarget | null): boolean {
+  const node = t as HTMLElement | null
+  if (!node || typeof node.tagName !== 'string') return false
+  const tag = node.tagName
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || node.isContentEditable === true
+}
+
 /* --------------------------------- icons --------------------------------- */
 
 const ICON_PATHS: Record<string, string> = {

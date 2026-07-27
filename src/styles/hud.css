@@ -565,9 +565,14 @@ body.ch-paused .hud-dock {
 .map__c {
   display: block;
   width: 100%;
-  /* A plan of a cluster that is wider than it is deep. Fixed, because the
-     projection inside is uniform and a stretched box would waste it. */
-  height: 168px;
+  /* 178 CSS pixels of usable width, and the built world is 720 units across by
+     910 deep — the clients terminal sits a long way north of the shards, so the
+     plan is DEEPER than it is wide. The projection inside is uniform, so a box
+     of the wrong aspect does not stretch the map, it surrounds it with empty
+     ground: at the 168px this used to be, the whole cluster was squeezed into a
+     narrow strip down the middle of the canvas. `map-aspect.test.ts` keeps this
+     number honest against `world/layout.ts`. */
+  height: 225px;
 }
 .map__cap {
   font-family: var(--f-mono);

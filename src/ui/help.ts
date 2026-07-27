@@ -1,5 +1,5 @@
 import { cssColor } from '../core/theme'
-import { el, icon } from './uikit'
+import { el, icon, physicalKey } from './uikit'
 import type { UiContext, UiModule } from './uikit'
 
 /* ============================================================================
@@ -23,7 +23,7 @@ const CAMERA_KEYS: [string, string][] = [
 ]
 
 const KEYS: [string, string][] = [
-  ['F', 'Fly mode. Click the scene to capture the mouse; Esc gives it back'],
+  ['F', 'Fly mode on and off. Click the scene to capture the mouse; Esc gives it back'],
   ['Esc', 'Release the mouse · press again to leave fly mode'],
   ['H', 'Back to the establishing shot'],
   ['T', 'Guided tour'],
@@ -46,10 +46,11 @@ const FLY_KEYS: [string, string][] = [
 
 /** The map is small and does more than it looks like it does. */
 const MAP_NOTES: [string, string][] = [
-  ['Click', 'Fly to that district'],
-  ['Island fill', 'That node’s worst signal: parts, replica delay, read-only, down'],
-  ['Cone', 'Where you are and what you can see'],
-  ['Arrowhead', 'You are off the edge of the map, looking that way'],
+  ['Click a district', 'Fly to it'],
+  ['Click the ground', 'Back to the establishing shot'],
+  ['Island colour', 'Its own, unless that node is in trouble: parts, replica delay, read-only, down'],
+  ['Cone', 'Where you are and what you can see — pinned to the edge when you are outside the map'],
+  ['N ▲', 'North. The plan never rotates with you'],
 ]
 
 /**
@@ -162,7 +163,16 @@ export function createHelp(ctx: UiContext): UiModule {
         swatches(LEGEND),
       ),
       el('section', { class: 'help__sec' }, el('span', { class: 'ch-eyebrow', text: 'Camera' }), keyTable(CAMERA_KEYS)),
-      el('section', { class: 'help__sec' }, el('span', { class: 'ch-eyebrow', text: 'Keys' }), keyTable(KEYS)),
+      el(
+        'section',
+        { class: 'help__sec' },
+        el('span', { class: 'ch-eyebrow', text: 'Keys' }),
+        el('p', {
+          class: 'ch-hint',
+          text: 'Shortcuts follow the physical key, not the character it prints, so they work on any keyboard layout.',
+        }),
+        keyTable(KEYS),
+      ),
       el('section', { class: 'help__sec' }, el('span', { class: 'ch-eyebrow', text: 'In fly mode' }), keyTable(FLY_KEYS)),
       el('section', { class: 'help__sec' }, el('span', { class: 'ch-eyebrow', text: 'The minimap' }), keyTable(MAP_NOTES)),
     ),
@@ -188,7 +198,9 @@ export function createHelp(ctx: UiContext): UiModule {
       typeof node.tagName === 'string' &&
       (node.tagName === 'INPUT' || node.tagName === 'TEXTAREA' || node.isContentEditable === true)
     if (typing) return
-    if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
+    // `?` is Shift and the physical `/` key. Asking for the character instead
+    // meant this never fired on a layout where that key prints something else.
+    if (physicalKey(e) === '/' && e.shiftKey) {
       setOpen(!open)
       e.preventDefault()
       return

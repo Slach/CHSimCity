@@ -182,15 +182,18 @@ async function boot(): Promise<void> {
     rig.focusOn(def.focus, { instant })
   })
 
-  // The HUD's F key asks for a mode change; the rig announces the mode it ended
-  // up in. Guard so the two cannot ping-pong.
+  // `camera:mode` is a command — "be in this mode" — and the rig announces the
+  // mode it ended up in on the same channel. The guard stops the two echoing
+  // each other, which also means a request for the mode we are already in is a
+  // no-op: the F key's TOGGLE has to be resolved by whoever sends it, and the
+  // dead `mode === 'fly' && rig.mode === 'fly'` branch that used to sit here
+  // never once ran, so F could enter fly mode and never leave it.
   let applyingMode = false
   bus.on('camera:mode', ({ mode }) => {
     if (applyingMode || rig.mode === mode) return
     applyingMode = true
     try {
-      // F toggles: asking for fly while already flying means "stop flying".
-      rig.setMode(mode === 'fly' && rig.mode === 'fly' ? 'orbit' : mode)
+      rig.setMode(mode)
     } finally {
       applyingMode = false
     }

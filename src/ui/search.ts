@@ -2,7 +2,7 @@ import type { Knobs } from '../core/types'
 import { SCENARIOS } from '../sim/scenarios'
 import { KNOB_META } from './content'
 import { applyKnob } from './controls'
-import { clear, el, icon, setClass, setText } from './uikit'
+import { clear, el, icon, physicalKey, setClass, setText } from './uikit'
 import type { UiContext, UiModule } from './uikit'
 
 /* ============================================================================
@@ -285,14 +285,26 @@ export function createSearch(ctx: UiContext): UiModule {
   }
 
   function onKeyDown(e: KeyboardEvent): void {
-    if ((e.key === 'k' || e.key === 'K') && (e.ctrlKey || e.metaKey)) {
+    // The PHYSICAL key: `/` is `.` on a Cyrillic layout and `K` is `л`, so
+    // matching on the character meant the palette had no way to open at all
+    // for anyone not typing in Latin.
+    const k = physicalKey(e)
+    if (k === 'K' && (e.ctrlKey || e.metaKey)) {
       setOpen(!open)
+      e.preventDefault()
+      return
+    }
+    // Escape while the palette is up, but the focus has wandered out of the
+    // input — clicking a result's row and missing, say. The input's own
+    // handler cannot see that keystroke.
+    if (k === 'Escape' && open) {
+      setOpen(false)
       e.preventDefault()
       return
     }
     if (isTyping(e.target)) return
     // Shift-/ is `?`, which belongs to the help overlay.
-    if (e.key === '/' && !e.shiftKey && !open) {
+    if (k === '/' && !e.shiftKey && !open) {
       setOpen(true)
       e.preventDefault()
     }

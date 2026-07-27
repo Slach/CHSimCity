@@ -4,8 +4,14 @@ Read and follow [`CLAUDE.md`](CLAUDE.md) before changing this repository. It is
 the source of truth for architecture, ClickHouse language, testing, visual
 accuracy and delivery rules.
 
-The three things most likely to bite you, in order:
+The four things most likely to bite you, in order:
 
+0. **Bind shortcuts to `physicalKey(e)`, never `e.key`.** `e.key` is the
+   character the keyboard LAYOUT produces. On a Cyrillic layout `F` arrives as
+   `а` and `/` as `.`, so every shortcut matched against the character silently
+   stops existing — no error, nothing in the console, and the app simply looks
+   broken. Test a change to the keyboard with a Cyrillic-layout event, the way
+   `test/keys.test.ts` does; do not test it by pressing the key yourself.
 1. **`focus.target` and `labelAt` are WORLD coordinates.** Everything inside a
    node island is authored in local ones. Go through `nodeLocal()`. Getting this
    wrong put all four islands' labels and camera targets on one point between the

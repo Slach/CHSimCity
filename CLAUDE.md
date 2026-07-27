@@ -72,6 +72,23 @@ network calls.
 8. **No silent caps.** If a visualisation bounds what it draws, the counters must
    still report the truth. The parts yard is a *window*, not a limit: a part
    beyond it has `slot === -1`, is fully simulated, and is skipped by the world.
+9. **A shortcut is a physical key.** Bind through `physicalKey(e)` from
+   `ui/uikit.ts`, never `e.key`. `e.key` is the character the LAYOUT produces, so
+   on a Cyrillic keyboard `F` arrives as `а` and `/` as `.`, and every shortcut
+   written against it silently ceases to exist — with no error and nothing in the
+   console. That is how fly, the tour, the palette, pause, reset and the theme
+   toggle were all dead for a Russian-layout visitor while WASD kept working,
+   because the camera rig alone was already switching on `e.code`.
+10. **A toggle is resolved by its sender.** `camera:mode` is a command — "be in
+    this mode" — and the listener ignores a request for the mode it is already
+    in, which is what stops it echoing the rig's own announcement. So F has to
+    decide `fly` or `orbit` itself. A toggle expression inside that listener is
+    unreachable, and the one that used to be there meant fly mode could be
+    entered and never left.
+11. **A map with a uniform projection owns its aspect ratio.** The minimap
+    canvas cannot be given an arbitrary CSS box: it does not stretch to fit, it
+    surrounds the plan with empty ground. `test/minimap.test.ts` holds the
+    stylesheet to the extent computed from `world/layout.ts`.
 
 ## ClickHouse language
 

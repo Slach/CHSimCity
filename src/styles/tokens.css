@@ -306,14 +306,14 @@ body {
 
 /* Below this the free row is shorter than the map, and a squeezed grid row
    would let it ride up over the transport dock. The cluster is the map. */
-@media (max-height: 640px) {
+@media (max-height: 760px) {
   #minimap {
     display: none;
   }
 }
 @media (max-width: 760px) {
-  /* 168px of map is not worth a sixth of a phone screen when the cluster is
-     right there and one finger pans it. */
+  /* A quarter of a phone screen is not worth spending on a map when the
+     cluster is right there and one finger pans it. */
   #minimap {
     display: none;
   }

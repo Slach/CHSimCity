@@ -5,7 +5,7 @@ import { N_NODES } from '../core/types'
 import type { QualityLevel } from '../core/types'
 import { fmtBytes, fmtNum } from '../core/util'
 import { SCENARIOS } from '../sim/scenarios'
-import { el, icon, setClass, setText, sparkline } from './uikit'
+import { el, icon, isTypingTarget, physicalKey, setClass, setText, sparkline } from './uikit'
 import type { UiContext, UiModule } from './uikit'
 
 /* ============================================================================
@@ -305,13 +305,25 @@ export function createHud(ctx: UiContext): UiModule {
     icon('home', 14),
   )
 
+  /**
+   * F and the Fly button are the same affordance, and it is a TOGGLE. The
+   * decision has to be made here, where the current mode is known: the
+   * `camera:mode` event is a plain "be in this mode" command, and a listener
+   * that ignores a request for the mode it is already in — which is the only
+   * way to stop the rig's own announcement echoing back — can never see a
+   * request for `fly` while flying as anything but a no-op.
+   */
+  function toggleFly(): void {
+    ctx.bus.emit('camera:mode', { mode: ctx.getCamera().mode === 'fly' ? 'orbit' : 'fly' })
+  }
+
   const flyBtn = el(
     'button',
     {
       class: 'ch-btn',
       type: 'button',
       title: 'Fly mode (F) — free flight, click the scene to capture the mouse',
-      on: { click: () => ctx.bus.emit('camera:mode', { mode: 'fly' }) },
+      on: { click: () => toggleFly() },
     },
     icon('fly', 13),
     el('span', { text: 'Fly' }),
@@ -485,13 +497,6 @@ export function createHud(ctx: UiContext): UiModule {
    * Keyboard
    * ====================================================================*/
 
-  function isTyping(t: EventTarget | null): boolean {
-    const node = t as HTMLElement | null
-    if (!node || typeof node.tagName !== 'string') return false
-    const tag = node.tagName
-    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || node.isContentEditable === true
-  }
-
   /** District jump targets for keys 1–7. */
   const DISTRICT_KEYS: readonly string[] = [
     'clients',
@@ -504,12 +509,12 @@ export function createHud(ctx: UiContext): UiModule {
   ]
 
   function onKeyDown(e: KeyboardEvent): void {
-    if (isTyping(e.target) || e.metaKey || e.ctrlKey || e.altKey) return
+    if (isTypingTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey) return
 
-    switch (e.key) {
-      case 'k':
+    // The PHYSICAL key, never the character: on a Cyrillic layout `e.key` for
+    // this key is `а`, and switching on it made every shortcut here disappear.
+    switch (physicalKey(e)) {
       case 'K':
-      case 'p':
       case 'P':
         ctx.sim.setKnob('paused', !s().knobs.paused)
         e.preventDefault()
@@ -520,22 +525,18 @@ export function createHud(ctx: UiContext): UiModule {
       case '.':
         nudgeSpeed(1)
         return
-      case 'h':
       case 'H':
         ctx.bus.emit('focus', { id: null })
         return
-      case 't':
       case 'T':
         ctx.bus.emit('tour:start', {})
         return
-      case 'r':
       case 'R':
         ctx.sim.reset()
         ctx.bus.emit('toast', { text: 'Cluster reset', kind: 'good', ms: 2200 })
         return
-      case 'f':
       case 'F':
-        ctx.bus.emit('camera:mode', { mode: 'fly' })
+        toggleFly()
         return
       case 'Escape':
         // The first Esc releases the pointer — the browser does that itself and
@@ -544,7 +545,6 @@ export function createHud(ctx: UiContext): UiModule {
           ctx.bus.emit('camera:mode', { mode: 'orbit' })
         }
         return
-      case 'n':
       case 'N':
         toggleThemeMode()
         paintThemeBtn()
@@ -553,7 +553,7 @@ export function createHud(ctx: UiContext): UiModule {
         break
     }
 
-    const n = Number(e.key)
+    const n = Number(physicalKey(e))
     if (Number.isInteger(n) && n >= 1 && n <= DISTRICT_KEYS.length) {
       const id = DISTRICT_KEYS[n - 1]
       ctx.bus.emit('focus', { id })

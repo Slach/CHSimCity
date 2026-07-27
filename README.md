@@ -56,7 +56,7 @@ No server, no database, no network calls. It is a single static bundle.
 | Wheel | Zoom — the dolly follows the cursor, not the pivot |
 | Click · double-click | Select · fly to |
 | `W` `A` `S` `D` / arrows | Move |
-| `F` | Fly mode. Click the scene to capture the mouse; `Esc` gives it back, `Esc` again leaves |
+| `F` | Fly mode, on and off. Click the scene to capture the mouse; `Esc` gives it back, `Esc` again leaves |
 | `W` `A` `S` `D` · `Space` `C` · wheel | In fly mode: move · rise and descend · change speed |
 | `H` | Back to the establishing shot |
 | `T` | Guided tour — the whole cluster in fifteen chapters |
@@ -66,11 +66,15 @@ No server, no database, no network calls. It is a single static bundle.
 | `N` · `R` | Day / night · reset |
 | `1` – `7` | Jump: clients, initiator, the four nodes, Keeper |
 
+Every shortcut is bound to the **physical key**, not to the character it prints,
+so they all work unchanged on a non-Latin keyboard layout.
+
 The **minimap** in the bottom-left is a plan drawn from the same numbers the 3D
-scene is built from. Each island is filled by that node's worst signal — part
-count, replica delay, read-only, down — so a sick node is visible without flying
-to it. The cone is where you are and what you can see; when you are outside the
-map it becomes an arrowhead on the edge. Click any district to fly to it.
+scene is built from. Every district is labelled and carries its own colour —
+until a node is in trouble, when it gives that colour up for amber or red, so a
+sick node is visible without flying to it. The cone is where you are and what you
+can see; at the establishing shot you are south of the map and it pins itself to
+the edge. Click a district to fly to it, or the empty ground to pull back out.
 
 ---
 
