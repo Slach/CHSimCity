@@ -185,8 +185,17 @@ export function createHelp(ctx: UiContext): UiModule {
   function setOpen(next: boolean): void {
     open = next
     mount.hidden = !next
-    mount.classList.toggle('is-on', next)
-    if (next) closeBtn.focus()
+    if (next) {
+      // `hidden` really does mean `display: none` now, and a transition cannot
+      // run in the frame an element stops being display:none. Both the fade and
+      // the focus therefore wait for the next one.
+      requestAnimationFrame(() => {
+        mount.classList.add('is-on')
+        closeBtn.focus()
+      })
+    } else {
+      mount.classList.remove('is-on')
+    }
   }
 
   setOpen(false)

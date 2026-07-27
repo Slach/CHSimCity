@@ -1,10 +1,26 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
 import { describe, expect, it } from 'vitest'
 
-// `?raw` rather than node:fs on purpose: nothing in this project, tests
-// included, is allowed to reach for a Node API, and Vite types this for us.
-import hudCss from '../src/styles/hud.css?raw'
-import tokensCss from '../src/styles/tokens.css?raw'
 import { DISTRICT_BOUNDS } from '../src/world/layout'
+
+/**
+ * Read from disk, not through Vite. `import '…css?raw'` returns an EMPTY string
+ * under Vitest — it stubs CSS modules — and this file spent one commit doing
+ * exactly that: `cssPx` threw while the suite was being collected, Vitest
+ * reported the file as zero tests and zero failures, and the run stayed green.
+ * A test that asserts nothing is worse than no test, so the length check is
+ * part of the fixture.
+ */
+function sheet(name: string): string {
+  const css = readFileSync(fileURLToPath(new URL(`../src/styles/${name}`, import.meta.url)), 'utf8')
+  if (css.length < 100) throw new Error(`${name} came back empty — the test is not reading the stylesheet`)
+  return css
+}
+
+const hudCss = sheet('hud.css')
+const tokensCss = sheet('tokens.css')
 
 /* ============================================================================
  * THE MINIMAP'S BOX HAS TO MATCH THE WORLD IT DRAWS.

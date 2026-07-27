@@ -236,13 +236,18 @@ export function createSearch(ctx: UiContext): UiModule {
     if (next === open) return
     open = next
     overlay.hidden = !next
-    overlay.classList.toggle('is-on', next)
     if (next) {
       input.value = ''
       refresh()
-      // The focus has to wait for the element to stop being display:none.
-      requestAnimationFrame(() => input.focus())
+      // `hidden` really does mean `display: none` now, and a transition cannot
+      // run in the frame an element stops being display:none. Both the fade and
+      // the focus therefore wait for the next one.
+      requestAnimationFrame(() => {
+        overlay.classList.add('is-on')
+        input.focus()
+      })
     } else {
+      overlay.classList.remove('is-on')
       input.blur()
     }
   }

@@ -4,7 +4,7 @@ Read and follow [`CLAUDE.md`](CLAUDE.md) before changing this repository. It is
 the source of truth for architecture, ClickHouse language, testing, visual
 accuracy and delivery rules.
 
-The four things most likely to bite you, in order:
+The five things most likely to bite you, in order:
 
 0. **Bind shortcuts to `physicalKey(e)`, never `e.key`.** `e.key` is the
    character the keyboard LAYOUT produces. On a Cyrillic layout `F` arrives as
@@ -20,7 +20,12 @@ The four things most likely to bite you, in order:
    **deltas** from a baseline — `createSim` warms the cluster up at the DEFAULT
    settings before your knobs are applied. `test/model.test.ts` has `observe()`
    and `baseline()` for exactly this.
-3. **Never put `*/` inside a block comment** (a path like `shard*/` ends it) and
+3. **Read a stylesheet with `node:fs`, never `import '…css?raw'`.** Under Vitest
+   that import is an empty string. `test/minimap.test.ts` did it for one commit:
+   its fixture threw during collection, Vitest reported the file as zero tests
+   AND zero failures, and the suite stayed green while asserting nothing. Check
+   that the test COUNT went up, not just that the run is green.
+4. **Never put `*/` inside a block comment** (a path like `shard*/` ends it) and
    never put a backtick inside a template literal holding GLSL. Both have already
    broken the parse.
 
@@ -29,7 +34,7 @@ The four things most likely to bite you, in order:
 ```bash
 npm install
 npm run dev            # http://localhost:5174
-npm test               # two suites: model behaviour, plan/content consistency
+npm test               # model behaviour, plan consistency, keyboard, chrome
 npm run typecheck
 npm run build
 ```
@@ -40,6 +45,16 @@ before handing off.
 ## Visual verification
 
 Creating an image file is not verification — open it and say what it shows.
+
+Driving the app through the bus, or by assigning to `.value`, is not
+verification of a control either: it skips hit-testing, which is the only thing
+that can tell you a transparent full-screen overlay is swallowing every click in
+the application. Ask the browser where a click would actually land:
+
+```js
+const r = node.getBoundingClientRect()
+document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) // === node?
+```
 
 ```bash
 npm run preview

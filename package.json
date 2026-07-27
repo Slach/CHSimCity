@@ -24,6 +24,7 @@
     "preview": "vite preview --port 4173"
   },
   "devDependencies": {
+    "@types/node": "^26.1.1",
     "@types/three": "^0.185.0",
     "typescript": "^5.9.2",
     "vite": "^7.1.5",

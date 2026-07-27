@@ -85,7 +85,15 @@ network calls.
     decide `fly` or `orbit` itself. A toggle expression inside that listener is
     unreachable, and the one that used to be there meant fly mode could be
     entered and never left.
-11. **A map with a uniform projection owns its aspect ratio.** The minimap
+11. **A closed overlay must be `display: none`, not merely transparent.** An
+    author `display` beats the UA's `[hidden]` rule, so `.pal-overlay` and
+    `.help` — `position: fixed`, `inset: 0`, `pointer-events: auto` — stayed
+    hit-testable at `opacity: 0` and swallowed every click in the application
+    from the first paint: the scenario picker, the dock, the console tab and the
+    3D scene. The `[hidden] { display: none !important }` reset in `tokens.css`
+    is what makes `hidden` mean hidden; `test/overlays.test.ts` guards it. Verify
+    a control with `document.elementFromPoint`, never by emitting its bus event.
+12. **A map with a uniform projection owns its aspect ratio.** The minimap
     canvas cannot be given an arbitrary CSS box: it does not stretch to fit, it
     surrounds the plan with empty ground. `test/minimap.test.ts` holds the
     stylesheet to the extent computed from `world/layout.ts`.

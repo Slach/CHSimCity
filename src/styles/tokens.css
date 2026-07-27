@@ -210,6 +210,21 @@
   box-sizing: border-box;
 }
 
+/* `hidden` must always win.
+   The UA sheet says `[hidden] { display: none }`, which ANY author `display`
+   declaration beats — and both full-screen overlays declared `display: grid`.
+   Closed, they were `opacity: 0` and nothing else: invisible, `position: fixed`,
+   `inset: 0`, `pointer-events: auto`, z-index 24. So from the first paint a
+   transparent sheet covered the entire application and swallowed every click in
+   it — the scenario picker, the transport dock, the console tab and the 3D scene
+   alike — with no error and nothing to see. They also stayed in the
+   accessibility tree the whole time.
+   `!important` is the point: this rule exists precisely to be unbeatable by the
+   component stylesheets below it. */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   margin: 0;
