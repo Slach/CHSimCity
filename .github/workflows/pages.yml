@@ -40,11 +40,11 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          # The minimum the README claims, deliberately: building on the oldest
-          # supported runtime is how that claim stays true. This is the Node the
-          # BUILD runs on and is unrelated to the runtime the actions themselves
-          # use, which is what the v4 deprecation warning was about.
-          node-version: 20
+          # The latest Node, resolved at run time rather than pinned, so the
+          # deploy does not quietly rot on a version nobody is watching. Nothing
+          # here needs a specific one: the build is Vite and tsc, and the output
+          # is a static bundle that never runs on Node at all.
+          node-version: latest
           cache: npm
 
       # `ci`, not `install`: the lockfile is the input, and a deploy must not
