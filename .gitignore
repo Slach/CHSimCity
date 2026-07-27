@@ -4,3 +4,9 @@ dist/
 *.log
 tmp/
 .vite/
+
+# One lockfile is the source of truth, and it is package-lock.json — that is
+# what `npm ci` reads in the Pages workflow. Running the dev server with bun
+# works and writes this alongside it; committing both invites the two to drift
+# and CI to build something nobody ran.
+bun.lock
