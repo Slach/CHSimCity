@@ -39,7 +39,7 @@ import {
   siblingOf,
   streamCount,
 } from '../src/world/layout'
-import { markCount, partitionId, partName, shardHash } from '../src/core/util'
+import { headingFromMatrix, markCount, partitionId, partName, shardHash } from '../src/core/util'
 import { KNOB_META, doc, knobMeta } from '../src/ui/content'
 import { DOCS } from '../src/ui/docs'
 import { SCENARIOS } from '../src/sim/scenarios'
@@ -313,6 +313,40 @@ describe('part naming', () => {
     // that sends everything to one shard would make the whole district a lie.
     expect(counts[0]).toBeGreaterThan(8000)
     expect(counts[1]).toBeGreaterThan(8000)
+  })
+})
+
+describe('the minimap heading convention', () => {
+  /**
+   * A THREE.Matrix4 in column-major order whose third column is the camera's
+   * local +Z in world space. A camera looks down its own -Z, so `look` here is
+   * the direction the camera FACES and the matrix stores its negation.
+   */
+  const matrixFacing = (lx: number, lz: number): number[] => {
+    const m = new Array(16).fill(0)
+    m[0] = 1
+    m[5] = 1
+    m[8] = -lx
+    m[10] = -lz
+    m[15] = 1
+    return m
+  }
+
+  const deg = (rad: number): number => Math.round((rad * 180) / Math.PI)
+
+  it('reports 0 for north, and grows clockwise', () => {
+    // North is -Z in this world. Getting this backwards pointed the minimap's
+    // view cone exactly away from where the camera was looking.
+    expect(deg(headingFromMatrix(matrixFacing(0, -1)))).toBe(0)
+    expect(deg(headingFromMatrix(matrixFacing(1, 0)))).toBe(90)
+    expect(Math.abs(deg(headingFromMatrix(matrixFacing(0, 1))))).toBe(180)
+    expect(deg(headingFromMatrix(matrixFacing(-1, 0)))).toBe(-90)
+  })
+
+  it('is continuous through the diagonals', () => {
+    const r = Math.SQRT1_2
+    expect(deg(headingFromMatrix(matrixFacing(r, -r)))).toBe(45)
+    expect(deg(headingFromMatrix(matrixFacing(r, r)))).toBe(135)
   })
 })
 

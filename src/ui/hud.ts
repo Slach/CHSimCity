@@ -305,6 +305,18 @@ export function createHud(ctx: UiContext): UiModule {
     icon('home', 14),
   )
 
+  const flyBtn = el(
+    'button',
+    {
+      class: 'ch-btn',
+      type: 'button',
+      title: 'Fly mode (F) — free flight, click the scene to capture the mouse',
+      on: { click: () => ctx.bus.emit('camera:mode', { mode: 'fly' }) },
+    },
+    icon('fly', 13),
+    el('span', { text: 'Fly' }),
+  )
+
   const tourBtn = el(
     'button',
     {
@@ -359,7 +371,7 @@ export function createHud(ctx: UiContext): UiModule {
     'div',
     { class: 'hud-dock' },
     el('div', { class: 'hud-dock__group' }, pauseBtn, slowerBtn, speedText, fasterBtn),
-    el('div', { class: 'hud-dock__group' }, homeBtn, tourBtn, searchBtn, helpBtn),
+    el('div', { class: 'hud-dock__group' }, homeBtn, flyBtn, tourBtn, searchBtn, helpBtn),
     el('div', { class: 'hud-dock__group hud-dock__group--wide' }, scenarioSelect),
   )
   bottom.append(dock)
@@ -439,6 +451,37 @@ export function createHud(ctx: UiContext): UiModule {
   })
 
   /* ======================================================================
+   * FLY OVERLAY
+   *
+   * Fly mode has two states people confuse, so the overlay names both. The
+   * mouse is either CAPTURED — the pointer is locked, moving it looks around,
+   * and Esc gives it back — or it is not, in which case you are still flying but
+   * have to drag to look. Without this, releasing the pointer reads as the mode
+   * having silently ended.
+   * ====================================================================*/
+
+  const flySpeed = el('span', { class: 'hud-fly__v' })
+  const flyAlt = el('span', { class: 'hud-fly__v' })
+  const flyHint = el('span', { class: 'hud-fly__hint' })
+  const flyOverlay = el(
+    'div',
+    { class: 'hud-fly' },
+    el('div', { class: 'hud-fly__cross' }),
+    el(
+      'div',
+      { class: 'hud-fly__bar' },
+      el('span', { class: 'hud-fly__k', text: 'FLY' }),
+      el('span', { class: 'hud-fly__k', text: 'speed' }),
+      flySpeed,
+      el('span', { class: 'hud-fly__k', text: 'alt' }),
+      flyAlt,
+      flyHint,
+    ),
+  )
+  flyOverlay.hidden = true
+  bottom.parentElement?.append(flyOverlay)
+
+  /* ======================================================================
    * Keyboard
    * ====================================================================*/
 
@@ -494,6 +537,13 @@ export function createHud(ctx: UiContext): UiModule {
       case 'F':
         ctx.bus.emit('camera:mode', { mode: 'fly' })
         return
+      case 'Escape':
+        // The first Esc releases the pointer — the browser does that itself and
+        // we never see the key. The second one, which we do see, leaves the mode.
+        if (ctx.getCamera().mode === 'fly' && !ctx.getCamera().locked) {
+          ctx.bus.emit('camera:mode', { mode: 'orbit' })
+        }
+        return
       case 'n':
       case 'N':
         toggleThemeMode()
@@ -533,6 +583,8 @@ export function createHud(ctx: UiContext): UiModule {
   let acc = TICK
   let sparkAcc = SPARK_TICK
   let lastPaused: boolean | null = null
+  let lastFlying: boolean | null = null
+  let lastLocked: boolean | null = null
 
   return {
     update(dt: number) {
@@ -557,6 +609,32 @@ export function createHud(ctx: UiContext): UiModule {
 
         setText(fpsText, ctx.getFps().toFixed(0))
         setText(speedText, `${s().knobs.timeScale.toFixed(1)}×`)
+
+        /* --- fly mode ---------------------------------------------------- */
+        const cam = ctx.getCamera()
+        const flying = cam.mode === 'fly'
+        if (flying !== lastFlying) {
+          lastFlying = flying
+          setClass(flyBtn, 'is-active', flying)
+          flyOverlay.hidden = !flying
+          setClass(document.body, 'ch-flying', flying)
+        }
+        if (flying) {
+          setText(flySpeed, `${cam.speed.toFixed(0)} u/s`)
+          setText(flyAlt, `${cam.y.toFixed(0)} m`)
+          if (cam.locked !== lastLocked) {
+            lastLocked = cam.locked
+            setText(
+              flyHint,
+              cam.locked
+                ? 'Esc releases the mouse · wheel changes speed · Space / C for up and down'
+                : 'click the scene to capture the mouse · Esc leaves fly mode',
+            )
+            setClass(flyOverlay, 'is-locked', cam.locked)
+          }
+        } else {
+          lastLocked = null
+        }
 
         const paused = s().knobs.paused
         if (paused !== lastPaused) {
@@ -599,6 +677,8 @@ export function createHud(ctx: UiContext): UiModule {
       bar.remove()
       dock.remove()
       narrate.remove()
+      flyOverlay.remove()
+      document.body.classList.remove('ch-flying')
       for (const t of toasts) t.node.remove()
       toasts.length = 0
     },

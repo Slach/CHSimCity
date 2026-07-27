@@ -551,3 +551,134 @@ body.ch-paused .hud-dock {
     white-space: normal;
   }
 }
+
+/* ------------------------------- minimap --------------------------------- */
+
+.map {
+  pointer-events: auto;
+  position: relative;
+  width: 190px;
+  background: var(--bg-panel);
+  backdrop-filter: blur(6px);
+  padding: 6px 6px 4px;
+}
+.map__c {
+  display: block;
+  width: 100%;
+  /* A plan of a cluster that is wider than it is deep. Fixed, because the
+     projection inside is uniform and a stretched box would waste it. */
+  height: 168px;
+}
+.map__cap {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  color: var(--ink-faint);
+  text-align: center;
+  padding-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ------------------------------ fly overlay ------------------------------ */
+
+.hud-fly {
+  position: fixed;
+  inset: 0;
+  z-index: 6;
+  /* Chrome, not a surface: every pointer event belongs to the camera. */
+  pointer-events: none;
+}
+
+/* The crosshair only means something once the mouse is captured — before that
+   the cursor is still the pointer and a second reticle would be a lie. */
+.hud-fly__cross {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease);
+}
+.hud-fly.is-locked .hud-fly__cross {
+  opacity: 0.75;
+}
+.hud-fly__cross::before,
+.hud-fly__cross::after {
+  content: '';
+  position: absolute;
+  background: var(--c-warn);
+}
+.hud-fly__cross::before {
+  left: 50%;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  margin-left: -0.5px;
+}
+.hud-fly__cross::after {
+  top: 50%;
+  left: 0;
+  height: 1px;
+  width: 100%;
+  margin-top: -0.5px;
+}
+
+.hud-fly__bar {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  top: calc(76px + var(--safe-t));
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-panel);
+  backdrop-filter: blur(6px);
+  border-left: 2px solid var(--c-warn);
+  white-space: nowrap;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+}
+.hud-fly__k {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ink-faint);
+}
+.hud-fly__bar .hud-fly__k:first-child {
+  color: var(--c-warn);
+  font-weight: 700;
+}
+.hud-fly__v {
+  font-family: var(--f-mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+}
+.hud-fly__hint {
+  font-size: var(--fs-micro);
+  color: var(--ink-faint);
+  padding-left: 6px;
+  border-left: 1px solid var(--line-hair);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The side panels are for reading and fly mode is for moving; leaving them open
+   over a captured pointer just hides the scene you are flying through. */
+body.ch-flying .chc-host.is-open .chc-panel {
+  opacity: 0.25;
+}
+body.ch-flying .chc-host.is-open .chc-panel:hover {
+  opacity: 1;
+}
+
+@media (max-width: 900px) {
+  .hud-fly__hint {
+    display: none;
+  }
+}

@@ -325,6 +325,12 @@ export function createPicker(opts: {
       dragging = false
       return
     }
+    /* In fly mode the click IS the gesture that captures the mouse, and while
+     * the pointer is captured its coordinates are meaningless for a raycast —
+     * they stop moving. Selecting on that click both picked whatever happened to
+     * be under the frozen cursor and stole the gesture the user meant for the
+     * camera. */
+    if (document.pointerLockElement !== null) return
 
     const hit = pickAt(ev.clientX, ev.clientY)
     const id = hit?.id ?? null

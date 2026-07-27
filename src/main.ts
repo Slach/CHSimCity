@@ -12,7 +12,7 @@ import {
   simulationAnimationDelta,
   wallDelta,
 } from './core/timebase'
-import { clamp } from './core/util'
+import { clamp, headingFromMatrix } from './core/util'
 import type { ComponentDef, FlowRequest, WorldContext, WorldModule } from './core/types'
 
 import { createRenderer } from './engine/renderer'
@@ -32,6 +32,7 @@ import { createNodes } from './world/nodes'
 import { createKeeper } from './world/keeper'
 
 import { createHud } from './ui/hud'
+import { createMinimap } from './ui/minimap'
 import { createHelp } from './ui/help'
 import { createControls } from './ui/controls'
 import { createInspector } from './ui/panel'
@@ -140,9 +141,25 @@ async function boot(): Promise<void> {
     getFps: () => gfx.fps,
     getQuality: () => gfx.quality,
     getFlowStats: () => ({ active: flows.active, dropped: flows.dropped }),
+    // Read live, never cached: the minimap's cone and the fly overlay's speed
+    // both have to agree with where the camera actually is this frame.
+    getCamera: () => ({
+      mode: rig.mode,
+      speed: rig.speed,
+      x: camera.position.x,
+      y: camera.position.y,
+      z: camera.position.z,
+      // Clockwise from north. See headingFromMatrix: the sign convention here
+      // is the one that made the minimap's cone point backwards.
+      yaw: headingFromMatrix(camera.matrix.elements),
+      fov: (camera.fov * Math.PI) / 180,
+      aspect: camera.aspect,
+      locked: document.pointerLockElement === renderer.domElement,
+    }),
   }
   const ui: UiModule[] = [
     createHud(uiCtx),
+    createMinimap(uiCtx),
     createHelp(uiCtx),
     createControls(uiCtx),
     createInspector(uiCtx),

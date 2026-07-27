@@ -23,7 +23,8 @@ const CAMERA_KEYS: [string, string][] = [
 ]
 
 const KEYS: [string, string][] = [
-  ['F', 'Fly mode — pointer-locked, free flight'],
+  ['F', 'Fly mode. Click the scene to capture the mouse; Esc gives it back'],
+  ['Esc', 'Release the mouse · press again to leave fly mode'],
   ['H', 'Back to the establishing shot'],
   ['T', 'Guided tour'],
   ['/ or Ctrl-K', 'Search every component, setting and scenario'],
@@ -33,7 +34,22 @@ const KEYS: [string, string][] = [
   ['N', 'Day / night'],
   ['R', 'Reset the cluster'],
   ['1 – 7', 'Jump: clients, initiator, the four nodes, Keeper'],
-  ['Esc', 'Close the topmost overlay'],
+]
+
+/** In fly mode the movement keys mean something the orbit list does not cover. */
+const FLY_KEYS: [string, string][] = [
+  ['W A S D', 'Move, relative to where you are looking'],
+  ['Space · C', 'Rise · descend, always world-vertical'],
+  ['Wheel', 'Change speed — it does not zoom in fly mode'],
+  ['Shift · Alt', 'Boost · precision'],
+]
+
+/** The map is small and does more than it looks like it does. */
+const MAP_NOTES: [string, string][] = [
+  ['Click', 'Fly to that district'],
+  ['Island fill', 'That node’s worst signal: parts, replica delay, read-only, down'],
+  ['Cone', 'Where you are and what you can see'],
+  ['Arrowhead', 'You are off the edge of the map, looking that way'],
 ]
 
 /**
@@ -147,6 +163,8 @@ export function createHelp(ctx: UiContext): UiModule {
       ),
       el('section', { class: 'help__sec' }, el('span', { class: 'ch-eyebrow', text: 'Camera' }), keyTable(CAMERA_KEYS)),
       el('section', { class: 'help__sec' }, el('span', { class: 'ch-eyebrow', text: 'Keys' }), keyTable(KEYS)),
+      el('section', { class: 'help__sec' }, el('span', { class: 'ch-eyebrow', text: 'In fly mode' }), keyTable(FLY_KEYS)),
+      el('section', { class: 'help__sec' }, el('span', { class: 'ch-eyebrow', text: 'The minimap' }), keyTable(MAP_NOTES)),
     ),
   )
 

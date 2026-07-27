@@ -56,7 +56,8 @@ No server, no database, no network calls. It is a single static bundle.
 | Wheel | Zoom — the dolly follows the cursor, not the pivot |
 | Click · double-click | Select · fly to |
 | `W` `A` `S` `D` / arrows | Move |
-| `F` | Fly mode (pointer-locked) |
+| `F` | Fly mode. Click the scene to capture the mouse; `Esc` gives it back, `Esc` again leaves |
+| `W` `A` `S` `D` · `Space` `C` · wheel | In fly mode: move · rise and descend · change speed |
 | `H` | Back to the establishing shot |
 | `T` | Guided tour — the whole cluster in fifteen chapters |
 | `/` or `Ctrl-K` | Command palette: every component, setting and scenario |
@@ -64,6 +65,12 @@ No server, no database, no network calls. It is a single static bundle.
 | `K` or `P` · `,` `.` | Pause · slower / faster |
 | `N` · `R` | Day / night · reset |
 | `1` – `7` | Jump: clients, initiator, the four nodes, Keeper |
+
+The **minimap** in the bottom-left is a plan drawn from the same numbers the 3D
+scene is built from. Each island is filled by that node's worst signal — part
+count, replica delay, read-only, down — so a sick node is visible without flying
+to it. The cone is where you are and what you can see; when you are outside the
+map it becomes an arrowhead on the edge. Click any district to fly to it.
 
 ---
 

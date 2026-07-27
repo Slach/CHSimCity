@@ -69,6 +69,23 @@ export function shardHash(key: number): number {
   return (h ^ (h >>> 16)) >>> 0
 }
 
+/**
+ * Compass heading of a camera, in radians, measured CLOCKWISE FROM NORTH.
+ *
+ * `m` is a THREE.Matrix4's element array in column-major order. Elements 8..10
+ * are the camera's local +Z axis in world space, and a camera looks down its
+ * own -Z, so the forward vector is `(-m[8], -m[9], -m[10])`.
+ *
+ * The convention matters and is easy to get backwards: north is -Z in this
+ * world, so a camera looking north must return 0, and one looking east must
+ * return +PI/2. That is `atan2(forwardX, -forwardZ)`, NOT
+ * `atan2(forwardX, forwardZ)` — the latter returns 0 for SOUTH and made the
+ * minimap's view cone point exactly away from where the camera was looking.
+ */
+export function headingFromMatrix(m: ArrayLike<number>): number {
+  return Math.atan2(-m[8], m[10])
+}
+
 /* ------------------------------ accessibility ---------------------------- */
 
 /**

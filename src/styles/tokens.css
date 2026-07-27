@@ -297,6 +297,27 @@ body {
   gap: 6px;
   justify-items: end;
 }
+/* The map shares the free centre row with the toasts, in the opposite corner,
+   so neither can ever cover the other however long a toast gets. */
+#minimap {
+  grid-area: center;
+  place-self: end start;
+}
+
+/* Below this the free row is shorter than the map, and a squeezed grid row
+   would let it ride up over the transport dock. The cluster is the map. */
+@media (max-height: 640px) {
+  #minimap {
+    display: none;
+  }
+}
+@media (max-width: 760px) {
+  /* 168px of map is not worth a sixth of a phone screen when the cluster is
+     right there and one finger pans it. */
+  #minimap {
+    display: none;
+  }
+}
 
 /* Anything interactive opts back in. */
 #hud button,

@@ -1,10 +1,29 @@
-import type { Bus, QualitySettings, SimApi } from '../core/types'
+import type { Bus, CameraMode, QualitySettings, SimApi } from '../core/types'
 import type { Registry } from '../core/registry'
 
 /* ============================================================================
  * Shared UI plumbing. Every HUD module takes a UiContext and builds DOM with
  * these helpers, so the whole interface stays one consistent object.
  * ==========================================================================*/
+
+/** Where the camera is and what it is doing. Read per frame; never cached. */
+export interface CameraReadout {
+  mode: CameraMode
+  /** Fly speed in world units per second. */
+  speed: number
+  /** World position, so the minimap can draw the viewer. */
+  x: number
+  y: number
+  z: number
+  /** Heading in radians, measured the way atan2(x, z) gives it. */
+  yaw: number
+  /** Vertical field of view in radians, for the minimap's view cone. */
+  fov: number
+  /** Aspect ratio, so the cone is the horizontal field and not the vertical one. */
+  aspect: number
+  /** True while the pointer is captured — the click that captured it must not select. */
+  locked: boolean
+}
 
 export interface UiContext {
   bus: Bus
@@ -13,6 +32,7 @@ export interface UiContext {
   getFps(): number
   getQuality(): QualitySettings
   getFlowStats(): { active: number; dropped: number }
+  getCamera(): CameraReadout
 }
 
 export interface UiModule {
