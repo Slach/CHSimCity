@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en" data-theme="day">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="description" content="CHSimCity — an explorable 3D cluster that shows how ClickHouse actually works." />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#cfe0ee" />
+    <script>
+      // Stamp the stored theme before CSS can paint, so the boot screen already
+      // comes up in the right one. Day is the default.
+      ;(() => {
+        const root = document.documentElement
+        let mode = root.dataset.theme
+        try {
+          const stored = window.localStorage.getItem('chsimcity.theme')
+          if (stored === 'day' || stored === 'night') mode = stored
+        } catch {
+          // Storage can be unavailable; the daylight attribute above stands.
+        }
+        root.dataset.theme = mode
+        root.style.colorScheme = mode === 'night' ? 'dark' : 'light'
+        document
+          .querySelector('meta[name="theme-color"]')
+          ?.setAttribute('content', mode === 'night' ? '#04060b' : '#cfe0ee')
+      })()
+    </script>
+    <title>CHSimCity · How ClickHouse Works, in 3D</title>
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="CHSimCity" />
+    <meta property="og:title" content="CHSimCity · How ClickHouse Works, in 3D" />
+    <meta
+      property="og:description"
+      content="An explorable 3D cluster that shows how ClickHouse actually works — parts, the primary index, skip indexes, the read pool, merges, TTL, Distributed and ReplicatedMergeTree, all running live in your browser."
+    />
+  </head>
+  <body>
+    <!-- ============ WebGL canvas mounts here ============ -->
+    <div id="stage">
+      <div id="canvas-root"></div>
+      <!-- CSS2DRenderer output is appended here by engine/labels.ts -->
+      <div id="labels-root" aria-hidden="true"></div>
+    </div>
+
+    <!-- ============ HUD layers (filled by src/ui/*) ============ -->
+    <div id="hud">
+      <header id="hud-top"></header>
+      <aside id="hud-left"></aside>
+      <aside id="hud-right"></aside>
+      <footer id="hud-bottom"></footer>
+      <div id="tour-layer"></div>
+      <div id="toast-stack"></div>
+      <div id="help-overlay" hidden></div>
+    </div>
+
+    <!-- ============ Boot screen ============ -->
+    <div id="boot">
+      <div class="boot-inner">
+        <h1 class="boot-title">CH<span>SimCity</span></h1>
+        <p class="boot-sub">A working model of the ClickHouse engine</p>
+        <div class="boot-bar"><i id="boot-fill" style="width: 2%"></i></div>
+        <p class="boot-status" id="boot-status">loading the cluster code…</p>
+        <p class="boot-honesty">
+          <strong>Early prototype.</strong> It is a <em>model</em> of ClickHouse, not an emulator: no ClickHouse source
+          code runs here, and the numbers are scaled so a human can watch them. It almost certainly contains
+          inaccuracies in both the model and the explanations. Found one? That is the most valuable thing this project
+          can receive.
+        </p>
+      </div>
+    </div>
+
+    <noscript>
+      <div style="min-height: 100%; padding: 2rem; font: 16px system-ui; color: #18222e; background: #cfe0ee">
+        CHSimCity needs JavaScript and WebGL2 to run.
+      </div>
+    </noscript>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,0 +1,401 @@
+/* ============================================================
+   CHSimCity design tokens — the single source of truth for colour on the DOM
+   side. Keep in sync with src/core/themes.ts, which owns the 3D side.
+
+   TWO THEMES. The unqualified tokens are the night fallback; index.html stamps
+   the stored choice onto <html data-theme="day|night"> before CSS can paint,
+   using day when there is no choice. core/theme.ts keeps that attribute and
+   color-scheme in sync after startup.
+   ============================================================ */
+
+:root {
+  /* --- surfaces --- */
+  --bg-void: #04060b;
+  --bg-deep: #070a13;
+  /* The cluster stays visible around a panel, not through its prose. Lower
+     opacities made both contrast and rhythm depend on what was behind it. */
+  --bg-panel: rgba(10, 15, 26, 0.97);
+  --bg-panel-solid: #0a0f1a;
+  --bg-raise: rgba(20, 30, 48, 0.72);
+  --bg-sunken: rgba(3, 6, 12, 0.6);
+  --bg-overlay: rgba(3, 6, 12, 0.78);
+
+  /* --- strokes --- */
+  --line-hair: rgba(120, 170, 235, 0.14);
+  --line-soft: rgba(120, 170, 235, 0.26);
+  --line-hard: rgba(150, 200, 255, 0.45);
+
+  /* --- type --- */
+  --ink: #e8f1ff;
+  --ink-dim: #a9bcd8;
+  --ink-faint: #8195b4;
+  --ink-invert: #04060b;
+
+  /* --- semantic system colours (mirrored in core/themes.ts NIGHT_PALETTE) --- */
+  --c-client: #8ecae6;
+  --c-distributed: #6ea8ff;
+  --c-node: #4fd1c5;
+  --c-part-active: #3fd98a;
+  --c-part-outdated: #5a6b7d;
+  --c-part-preactive: #7fd8ff;
+  --c-part-temporary: #9a8cff;
+  --c-part-expired: #ff6b8a;
+  --c-primary-index: #ffd166;
+  --c-skip-index: #64ffda;
+  --c-mark-cache: #ffa94d;
+  --c-block-cache: #4fe3c1;
+  --c-reader: #5ad1ff;
+  --c-merge: #ffb03a;
+  --c-mutation: #c77dff;
+  --c-ttl: #ff5d8f;
+  --c-replication: #ff9f1c;
+  --c-fetch: #ff7a45;
+  --c-keeper: #b388ff;
+  --c-hot: #57e389;
+  --c-cold: #4a7fa5;
+  --c-ok: #57e389;
+  --c-warn: #ffcc55;
+  --c-crit: #ff5f6d;
+
+  /* --- geometry --- */
+  --r-sm: 2px;
+  --r-md: 3px;
+  --r-lg: 4px;
+
+  /* --- type ramp --- */
+  --f-ui: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Inter, Roboto, sans-serif;
+  --f-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Fira Code', Menlo, Consolas, monospace;
+  --fs-micro: 11px;
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 19px;
+
+  /* --- motion --- */
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur: 220ms;
+  --dur-slow: 420ms;
+
+  /* --- layout --- */
+  --hud-gap: 14px;
+  --panel-w: 430px;
+  --rail-w: 320px;
+
+  /* The notch, the rounded corners and the home indicator. Zero on a desktop
+     browser; real numbers on a phone once the document opts in with
+     viewport-fit=cover. */
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+
+  /* The smallest thing a thumb can reliably hit. Used, not decorative. */
+  --tap: 44px;
+}
+
+/* ============================================================
+   DAY — the console at noon.
+
+   A dark panel over a bright cluster is unreadable, so day mode is not a tint
+   of night: the panels become paper, the type becomes ink, and the semantic
+   colours are the re-picked deep values from src/core/themes.ts — NOT the night
+   ones, which turn into pastel washes on white.
+   ============================================================ */
+
+:root[data-theme='day'] {
+  --bg-void: #cfe0ee;
+  --bg-deep: #e8e3d8;
+  --bg-panel: rgba(250, 248, 243, 0.96);
+  --bg-panel-solid: #faf8f3;
+  --bg-raise: rgba(255, 255, 255, 0.82);
+  --bg-sunken: rgba(24, 34, 46, 0.07);
+  --bg-overlay: rgba(24, 34, 46, 0.28);
+
+  --line-hair: rgba(24, 34, 46, 0.11);
+  --line-soft: rgba(24, 34, 46, 0.2);
+  --line-hard: rgba(24, 34, 46, 0.4);
+
+  --ink: #18222e;
+  --ink-dim: #47576a;
+  --ink-faint: #6a7b8c;
+  --ink-invert: #faf8f3;
+
+  /* mirrored from core/themes.ts DAY_PALETTE */
+  --c-client: #5f96c4;
+  --c-distributed: #2b5fc4;
+  --c-node: #0b8f83;
+  --c-part-active: #14884a;
+  --c-part-outdated: #8b96a2;
+  --c-part-preactive: #1673ad;
+  --c-part-temporary: #4b3fbd;
+  --c-part-expired: #c42a4c;
+  --c-primary-index: #a87c05;
+  --c-skip-index: #05a47e;
+  --c-mark-cache: #bc6208;
+  --c-block-cache: #0e8f8c;
+  --c-reader: #0089b5;
+  --c-merge: #b8720a;
+  --c-mutation: #8b2bc0;
+  --c-ttl: #c4265f;
+  --c-replication: #e2690d;
+  --c-fetch: #c9451f;
+  --c-keeper: #6a3fd0;
+  --c-hot: #3f9c22;
+  --c-cold: #2c5f7d;
+  --c-ok: #3f9c22;
+  --c-warn: #d18a04;
+  --c-crit: #b01030;
+}
+
+/* --- day patches for the darks hardcoded elsewhere ------------------------
+   Each rule below is the day counterpart of exactly one hardcoded dark, scoped
+   under [data-theme="day"] so it outranks the original by specificity rather
+   than by import order. */
+
+:root[data-theme='day'] .ch-btn:hover {
+  background: rgba(24, 34, 46, 0.08);
+}
+:root[data-theme='day'] .ch-scroll::-webkit-scrollbar-thumb {
+  background: rgba(24, 34, 46, 0.22);
+}
+:root[data-theme='day'] .ch-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(24, 34, 46, 0.38);
+}
+:root[data-theme='day'] .ch-range::-webkit-slider-runnable-track,
+:root[data-theme='day'] .ch-range::-moz-range-track,
+:root[data-theme='day'] .ch-toggle {
+  background: rgba(24, 34, 46, 0.16);
+}
+:root[data-theme='day'] .lbl__chip {
+  background: rgba(252, 251, 247, 0.94);
+}
+:root[data-theme='day'] .lbl__chip:hover,
+:root[data-theme='day'] .lbl.is-hovered .lbl__chip {
+  background: rgba(255, 255, 255, 0.98);
+}
+:root[data-theme='day'] .lbl.is-far .lbl__chip {
+  background: rgba(252, 251, 247, 0.9);
+}
+:root[data-theme='day'] .pal-overlay,
+:root[data-theme='day'] .help {
+  background: rgba(24, 34, 46, 0.28);
+}
+:root[data-theme='day'] .pal-row.is-sel {
+  background: var(--bg-sunken);
+}
+:root[data-theme='day'] .tour-bar {
+  background: rgba(24, 34, 46, 0.14);
+}
+:root[data-theme='day'] .tour-step::after {
+  background: rgba(24, 34, 46, 0.2);
+}
+:root[data-theme='day'] .hud-vital:hover {
+  background: rgba(24, 34, 46, 0.05);
+}
+:root[data-theme='day'] #boot {
+  background: var(--bg-void);
+}
+:root[data-theme='day'] .boot-bar {
+  background: rgba(24, 34, 46, 0.14);
+}
+
+/* ============================================================
+   Shell
+   ============================================================ */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg-void);
+  color: var(--ink);
+  font-family: var(--f-ui);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
+}
+
+#stage,
+#canvas-root {
+  position: fixed;
+  inset: 0;
+}
+
+#canvas-root canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  outline: none;
+}
+
+/* The CSS2D label layer must never eat pointer events wholesale. */
+#labels-root {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 2;
+}
+
+/* The HUD is a four-row grid. The tour deck owns a row of its own so it can
+   never collide with the toast stack at any width. */
+#hud {
+  position: fixed;
+  inset: 0;
+  z-index: 5;
+  pointer-events: none;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  /* minmax(0,1fr): on a short viewport the free row must be allowed to vanish
+     rather than push the deck and the transport off the bottom edge. */
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-areas:
+    'top top top'
+    'left center right'
+    'left deck right'
+    'bottom bottom bottom';
+  gap: var(--hud-gap);
+  padding: calc(var(--hud-gap) + var(--safe-t)) calc(var(--hud-gap) + var(--safe-r))
+    calc(var(--hud-gap) + var(--safe-b)) calc(var(--hud-gap) + var(--safe-l));
+}
+
+#hud > * {
+  pointer-events: none;
+}
+#hud-top {
+  grid-area: top;
+}
+#hud-left {
+  grid-area: left;
+  align-self: start;
+}
+#hud-right {
+  grid-area: right;
+  align-self: start;
+  justify-self: end;
+}
+#hud-bottom {
+  grid-area: bottom;
+}
+#tour-layer {
+  grid-area: deck;
+  place-self: end center;
+}
+#toast-stack {
+  grid-area: center;
+  place-self: start end;
+  display: grid;
+  gap: 6px;
+  justify-items: end;
+}
+
+/* Anything interactive opts back in. */
+#hud button,
+#hud input,
+#hud select,
+#hud a,
+#hud .interactive {
+  pointer-events: auto;
+}
+
+@media (max-width: 760px) {
+  :root {
+    --hud-gap: 8px;
+  }
+}
+
+/* --- boot screen --------------------------------------------------------- */
+
+#boot {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: var(--bg-void);
+  transition:
+    opacity 700ms var(--ease),
+    visibility 700ms;
+}
+#boot.done {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.boot-inner {
+  text-align: center;
+  display: grid;
+  gap: 10px;
+  justify-items: center;
+  padding: 24px;
+}
+.boot-title {
+  margin: 4px 0 0;
+  font-size: 40px;
+  letter-spacing: 0.24em;
+  font-weight: 300;
+  text-indent: 0.24em;
+}
+.boot-title span {
+  color: var(--c-node);
+  font-weight: 600;
+}
+.boot-sub {
+  margin: 0;
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.boot-bar {
+  margin-top: 18px;
+  width: 260px;
+  height: 2px;
+  background: rgba(120, 170, 235, 0.16);
+  overflow: hidden;
+}
+.boot-bar i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--c-node);
+  transition: width 300ms var(--ease);
+}
+.boot-status {
+  margin: 0;
+  font-family: var(--f-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-faint);
+}
+.boot-honesty {
+  width: min(460px, calc(100vw - 40px));
+  margin: 12px 0 0;
+  color: var(--ink-dim);
+  font-size: var(--fs-micro);
+  line-height: 1.6;
+}
+.boot-honesty strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+.boot-honesty a {
+  color: var(--c-node);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}

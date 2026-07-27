@@ -1,0 +1,553 @@
+/* ============================================================================
+   The HUD: top vitals bar, bottom transport dock, toasts, narration, tour deck,
+   help overlay and the command palette.
+   ==========================================================================*/
+
+/* ------------------------------- top bar --------------------------------- */
+
+.hud-bar {
+  pointer-events: none;
+  display: flex;
+  align-items: stretch;
+  gap: 14px;
+  background: var(--bg-panel);
+  backdrop-filter: blur(6px);
+  padding: 8px 12px;
+}
+
+.hud-brand {
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding-right: 6px;
+  flex: 0 0 auto;
+  letter-spacing: 0.12em;
+}
+.hud-brand__n {
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: var(--c-node);
+}
+.hud-brand__m {
+  font-size: var(--fs-lg);
+  font-weight: 300;
+  color: var(--ink);
+}
+
+.hud-vitals {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.hud-vital {
+  pointer-events: auto;
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+  padding: 2px 10px;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  gap: 1px;
+  min-width: 0;
+  flex: 1 1 0;
+  border-left: 1px solid var(--line-hair);
+  transition: background var(--dur-fast) var(--ease);
+}
+.hud-vital:first-child {
+  border-left: 0;
+}
+.hud-vital:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+.hud-vital:focus-visible {
+  outline: 2px solid var(--vital, var(--c-node));
+  outline-offset: -2px;
+}
+.hud-vital__k {
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--ink-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hud-vital__v {
+  font-family: var(--f-mono);
+  font-size: var(--fs-md);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.hud-vital__v.is-ok {
+  color: var(--c-ok);
+}
+.hud-vital__v.is-warn {
+  color: var(--c-warn);
+}
+.hud-vital__v.is-crit {
+  color: var(--c-crit);
+}
+.hud-vital__spark {
+  height: 18px;
+  min-height: 18px;
+}
+
+.hud-bar__right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding-left: 6px;
+  border-left: 1px solid var(--line-hair);
+}
+.hud-fps {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+}
+.hud-fps__k {
+  color: var(--ink-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+.hud-fps__v {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  min-width: 2ch;
+  text-align: right;
+}
+.hud-quality {
+  width: auto;
+  min-width: 92px;
+}
+
+@media (max-width: 1100px) {
+  /* The vitals are the point of the bar; the graphics readout is not. */
+  .hud-bar__right .hud-fps,
+  .hud-quality {
+    display: none;
+  }
+  .hud-vital__spark {
+    display: none;
+  }
+}
+@media (max-width: 760px) {
+  .hud-brand__m {
+    display: none;
+  }
+  /* Four vitals fit on a phone. The last two are the ones a phone visitor is
+     least likely to be diagnosing. */
+  .hud-vital:nth-child(n + 5) {
+    display: none;
+  }
+}
+
+/* ----------------------------- bottom dock ------------------------------- */
+
+.hud-dock {
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: var(--bg-panel);
+  backdrop-filter: blur(6px);
+  padding: 7px 12px;
+}
+.hud-dock__group {
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 10px;
+  border-right: 1px solid var(--line-hair);
+}
+.hud-dock__group:last-child {
+  border-right: 0;
+  padding-right: 0;
+}
+.hud-dock__group--wide {
+  flex: 1 1 200px;
+  max-width: 320px;
+}
+.hud-speed__v {
+  font-family: var(--f-mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  min-width: 4ch;
+  text-align: center;
+}
+.hud-scenario {
+  width: 100%;
+}
+.hud-dock.is-scenario .hud-scenario {
+  border-color: var(--c-merge);
+  color: var(--c-merge);
+}
+
+body.ch-paused .hud-dock {
+  box-shadow: inset 0 0 0 1px var(--c-warn);
+}
+
+/* -------------------------------- toasts --------------------------------- */
+
+.hud-toast {
+  pointer-events: auto;
+  max-width: min(420px, 60vw);
+  padding: 9px 12px;
+  background: var(--bg-panel);
+  backdrop-filter: blur(6px);
+  border-left: 2px solid var(--ink-faint);
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  color: var(--ink);
+  opacity: 0;
+  transform: translateX(10px);
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease-out-expo);
+}
+.hud-toast.is-on {
+  opacity: 1;
+  transform: none;
+}
+.hud-toast.is-warn {
+  border-left-color: var(--c-warn);
+}
+.hud-toast.is-good {
+  border-left-color: var(--c-ok);
+}
+
+/* ------------------------------ narration -------------------------------- */
+
+.hud-narrate {
+  position: fixed;
+  left: 50%;
+  bottom: calc(120px + var(--safe-b));
+  transform: translate(-50%, 12px);
+  width: min(560px, calc(100vw - 32px));
+  z-index: 7;
+  pointer-events: auto;
+  padding: 14px 40px 15px 16px;
+  background: var(--bg-panel);
+  backdrop-filter: blur(8px);
+  border-left: 2px solid var(--c-merge);
+  opacity: 0;
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease-out-expo);
+}
+.hud-narrate.is-on {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+.hud-narrate__t {
+  margin: 0 0 6px;
+  font-size: var(--fs-md);
+  font-weight: 650;
+  color: var(--ink);
+}
+.hud-narrate__b {
+  margin: 0;
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  color: var(--ink-dim);
+}
+.hud-narrate__x {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+
+/* ------------------------------ tour deck -------------------------------- */
+
+.tour-card {
+  pointer-events: auto;
+  width: min(640px, calc(100vw - 32px));
+  padding: 14px 16px 12px;
+  opacity: 0;
+  transform: translateY(10px);
+  transition:
+    opacity var(--dur) var(--ease),
+    transform var(--dur) var(--ease-out-expo);
+}
+.tour-card.is-on {
+  opacity: 1;
+  transform: none;
+}
+.tour-card__head {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.tour-num {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.14em;
+  color: var(--ink-faint);
+}
+.tour-title {
+  margin: 0 0 5px;
+  font-size: var(--fs-md);
+  font-weight: 650;
+  color: var(--ink);
+}
+.tour-body {
+  margin: 0 0 10px;
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+  color: var(--ink-dim);
+}
+.tour-bar {
+  height: 2px;
+  background: rgba(120, 170, 235, 0.16);
+  overflow: hidden;
+}
+.tour-bar__fill {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--c-node);
+}
+.tour-steps {
+  display: flex;
+  gap: 3px;
+  margin-top: 8px;
+}
+.tour-step {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 4px 0;
+  flex: 1 1 0;
+  cursor: pointer;
+}
+.tour-step::after {
+  content: '';
+  display: block;
+  height: 2px;
+  background: rgba(120, 170, 235, 0.2);
+  transition: background var(--dur-fast) var(--ease);
+}
+.tour-step:hover::after {
+  background: rgba(120, 170, 235, 0.5);
+}
+.tour-step.is-done::after {
+  background: var(--c-node);
+}
+.tour-step.is-now::after {
+  background: var(--c-merge);
+  height: 3px;
+}
+
+/* ------------------------------ help overlay ----------------------------- */
+
+.help {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: var(--bg-overlay);
+  backdrop-filter: blur(3px);
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease);
+  pointer-events: auto;
+}
+.help.is-on {
+  opacity: 1;
+}
+.help__card {
+  width: min(760px, calc(100vw - 32px));
+  max-height: min(80vh, 760px);
+}
+.help__x {
+  flex: 0 0 auto;
+}
+.help__body {
+  padding: 4px 18px 20px;
+  overflow-y: auto;
+  display: grid;
+  gap: 20px;
+}
+.help__sec {
+  display: grid;
+  gap: 8px;
+}
+.help-keys {
+  display: grid;
+  gap: 5px;
+}
+.help-keys__row {
+  display: grid;
+  grid-template-columns: 190px 1fr;
+  gap: 10px;
+  align-items: baseline;
+  font-size: var(--fs-xs);
+  color: var(--ink-dim);
+}
+.help-legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 6px 16px;
+}
+.help-legend__row {
+  display: grid;
+  grid-template-columns: 10px auto 1fr;
+  gap: 8px;
+  align-items: baseline;
+  font-size: var(--fs-micro);
+}
+.help-legend__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  align-self: center;
+}
+.help-legend__n {
+  font-family: var(--f-mono);
+  color: var(--ink);
+  white-space: nowrap;
+}
+.help-legend__w {
+  color: var(--ink-faint);
+}
+@media (max-width: 620px) {
+  .help-keys__row {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}
+
+/* --------------------------- command palette ----------------------------- */
+
+.pal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 24;
+  display: grid;
+  align-items: start;
+  justify-items: center;
+  padding-top: 14vh;
+  background: var(--bg-overlay);
+  backdrop-filter: blur(3px);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+  pointer-events: auto;
+}
+.pal-overlay.is-on {
+  opacity: 1;
+}
+.pal-dialog {
+  width: min(620px, calc(100vw - 32px));
+  max-height: 66vh;
+}
+.pal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line-hair);
+  color: var(--ink-faint);
+}
+.pal-input {
+  flex: 1 1 auto;
+  appearance: none;
+  background: transparent;
+  border: 0;
+  outline: none;
+  font: inherit;
+  font-size: var(--fs-md);
+  color: var(--ink);
+}
+.pal-input::placeholder {
+  color: var(--ink-faint);
+}
+.pal-list {
+  overflow-y: auto;
+  min-height: 0;
+  padding: 4px 0;
+}
+.pal-row {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  display: grid;
+  grid-template-columns: 76px minmax(0, auto) minmax(0, 1fr);
+  gap: 10px;
+  align-items: baseline;
+  padding: 7px 14px;
+}
+.pal-row.is-sel {
+  background: rgba(255, 255, 255, 0.06);
+}
+.pal-row__kind {
+  font-family: var(--f-mono);
+  font-size: var(--fs-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--ink-faint);
+}
+.pal-row__kind.is-component {
+  color: var(--c-node);
+}
+.pal-row__kind.is-setting {
+  color: var(--c-primary-index);
+}
+.pal-row__kind.is-scenario {
+  color: var(--c-merge);
+}
+.pal-row__n {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.pal-row__d {
+  font-size: var(--fs-micro);
+  color: var(--ink-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pal-empty {
+  padding: 18px 14px;
+  font-size: var(--fs-xs);
+  color: var(--ink-faint);
+}
+.pal-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line-hair);
+  font-size: var(--fs-micro);
+  color: var(--ink-faint);
+}
+@media (max-width: 620px) {
+  .pal-row {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+  .pal-row__d {
+    white-space: normal;
+  }
+}
