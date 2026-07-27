@@ -68,11 +68,12 @@ anywhere.
 |---|---|
 | Left-drag | Pan — grab the ground and move it, the way a map does |
 | Shift-drag / middle-drag | Orbit |
-| Wheel | Zoom — the dolly follows the cursor, not the pivot |
+| Wheel · pinch | Zoom — the dolly follows the cursor, not the pivot |
+| Two-finger scroll | Up and down zooms; sideways pans by the distance a drag would |
 | Click · double-click | Select · fly to |
 | `W` `A` `S` `D` / arrows | Move |
 | `F` | Fly mode, on and off. Click the scene to capture the mouse; `Esc` gives it back, `Esc` again leaves |
-| `W` `A` `S` `D` · `Space` `C` · wheel | In fly mode: move · rise and descend · change speed |
+| `W` `A` `S` `D` · `Space` `C` · wheel | In fly mode: move · rise and descend · move along your view. `Shift`-wheel changes speed |
 | `H` | Back to the establishing shot |
 | `T` | Guided tour — the whole cluster in fifteen chapters |
 | `/` or `Ctrl-K` | Command palette: every component, setting and scenario |

@@ -15,6 +15,8 @@ const CAMERA_KEYS: [string, string][] = [
   ['Left-drag', 'Pan — grab the ground and move it, the way a map does'],
   ['Shift-drag / middle-drag', 'Orbit around the cluster'],
   ['Wheel', 'Zoom — the dolly follows the cursor, not the pivot'],
+  ['Two-finger scroll', 'Up and down zooms · sideways pans, by the distance a drag would'],
+  ['Pinch', 'Zoom, on a trackpad or a touchscreen'],
   ['Touch', '1 finger pans · 2 fingers pinch to zoom, twist to turn'],
   ['Click', 'Select a structure · double-click to fly to it'],
   ['W A S D / arrows', 'Move'],
@@ -40,7 +42,8 @@ const KEYS: [string, string][] = [
 const FLY_KEYS: [string, string][] = [
   ['W A S D', 'Move, relative to where you are looking'],
   ['Space · C', 'Rise · descend, always world-vertical'],
-  ['Wheel', 'Change speed — it does not zoom in fly mode'],
+  ['Wheel · pinch', 'Move along the way you are looking'],
+  ['Shift-wheel', 'Change how fast W A S D move you'],
   ['Shift · Alt', 'Boost · precision'],
 ]
 

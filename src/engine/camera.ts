@@ -66,6 +66,20 @@ const PRECISION = 0.25
 /** Wheel: exp(px * k). One notch (~100px) ≈ 22%. */
 const ZOOM_K = 0.002
 const SPEED_K = 0.0018
+/**
+ * Pinch gain. A trackpad pinch arrives as ctrl+wheel with deltas an order of
+ * magnitude smaller than a mouse notch — single digits, where a wheel click is
+ * 100 or 120 — so at `ZOOM_K` a full two-finger pinch moves the camera by an
+ * imperceptible amount and reads as a gesture that is not supported.
+ */
+const PINCH_K = 0.02
+/**
+ * Fly-mode dolly: world units travelled per CSS pixel of scroll, per unit of
+ * `flySpeed`. At the default speed one trackpad flick covers roughly what a
+ * second of holding W does, which is what makes the wheel feel connected to the
+ * same camera the keys drive.
+ */
+const FLY_DOLLY_K = 0.02
 
 const FOCUS_DUR = 1.05
 /** Upward framing bias for auto-derived focus directions. */
@@ -159,11 +173,33 @@ function isTypingTarget(t: EventTarget | null): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true
 }
 
-/** Wheel deltas normalised to CSS pixels. */
-function wheelPixels(e: WheelEvent): number {
+/** Wheel deltas normalised to CSS pixels. `deltaMode` is lines or pages. */
+export function wheelPixels(e: WheelEvent): number {
   if (e.deltaMode === 1) return e.deltaY * 16
   if (e.deltaMode === 2) return e.deltaY * 100
   return e.deltaY
+}
+
+/**
+ * The same for the horizontal axis, which a trackpad sends constantly and a
+ * mouse almost never does. Ignoring it entirely meant a two-finger sideways
+ * swipe — the most natural way to move across a map on a laptop — did nothing.
+ */
+export function wheelPixelsX(e: WheelEvent): number {
+  if (e.deltaMode === 1) return e.deltaX * 16
+  if (e.deltaMode === 2) return e.deltaX * 100
+  return e.deltaX
+}
+
+/**
+ * Safari's non-standard pinch events. They are not in lib.dom, and they are the
+ * only way to read a trackpad pinch on that browser as a scale factor rather
+ * than as synthesised ctrl+wheel deltas.
+ */
+interface GestureEventLike extends Event {
+  scale: number
+  clientX: number
+  clientY: number
 }
 
 /**
@@ -229,6 +265,13 @@ export function createCameraRig(
   let inLookX = 0
   let inLookY = 0
   let pendingZoom = 1
+  /**
+   * World units the fly camera should travel along its view axis, accumulated
+   * from wheel and pinch events and consumed once per frame. An impulse, not a
+   * velocity: it is applied whole rather than scaled by `dt`, because a scroll
+   * is a discrete amount of travel and not a request to keep moving.
+   */
+  let pendingFlyDolly = 0
   let zoomNdcX = 0
   let zoomNdcY = 0
 
@@ -277,6 +320,12 @@ export function createCameraRig(
   function setMode_(m: CameraMode): void {
     if (m === mode) return
     mode = m
+    // Whichever accumulator the old mode was filling is meaningless to the new
+    // one: a fly dolly applied after switching to orbit would move the camera
+    // off its own orbit, and a pending zoom applied in fly mode is dead state.
+    pendingFlyDolly = 0
+    pendingZoom = 1
+    gestureScale = 1
     if (m === 'orbit' || m === 'fly') userMode = m
     bus.emit('camera:mode', { mode: m })
   }
@@ -492,17 +541,93 @@ export function createCameraRig(
     pinchAngle = ang
   }
 
-  function onWheel(e: WheelEvent): void {
-    interrupt()
-    e.preventDefault()
-    const px = wheelPixels(e)
+  /**
+   * Zoom by a number of CSS pixels' worth of scroll, in whichever mode we are
+   * in. In orbit that is a dolly on the orbit distance; in fly there is no
+   * distance to change, so it moves the camera along its own view axis — which
+   * is what "zoom" means for a free camera and what a viewer expects the wheel
+   * to do. Scaling the step by `flySpeed` keeps it proportionate: the wheel
+   * covers about as much ground per notch as a second of flying.
+   */
+  function zoomBy(px: number, k: number): void {
     if (mode === 'fly') {
-      // In fly mode the wheel changes how fast you move, not where you are.
-      flySpeed = clamp(flySpeed * Math.exp(-px * SPEED_K), MIN_FLY_SPEED, MAX_FLY_SPEED)
+      pendingFlyDolly += -px * k * flySpeed
       return
     }
-    ndcFromEvent(e)
-    pendingZoom *= Math.exp(px * ZOOM_K)
+    pendingZoom *= Math.exp(px * k)
+  }
+
+  function onWheel(e: WheelEvent): void {
+    interrupt()
+    // Always: an unprevented ctrl+wheel is the browser's own page zoom, and an
+    // unprevented two-finger scroll is a rubber-band on the document.
+    e.preventDefault()
+    const px = wheelPixels(e)
+
+    /* --- a trackpad pinch --------------------------------------------------
+     * Every engine reports a pinch as a wheel event with `ctrlKey` set, whether
+     * or not ctrl is held — it is the platform convention, not a modifier. The
+     * deltas are far smaller than a mouse notch, so the gain has to be larger
+     * or a full pinch moves the camera by nothing. */
+    if (e.ctrlKey) {
+      ndcFromEvent(e)
+      zoomBy(px, PINCH_K)
+      return
+    }
+
+    if (mode === 'fly') {
+      // Shift is the modifier for "how fast", so the bare wheel can mean the
+      // thing people reach for it to mean. It used to be the other way round:
+      // the wheel changed only the speed, which reads exactly like a wheel that
+      // does nothing, because nothing on screen moves until you also press W.
+      if (shiftDown) {
+        flySpeed = clamp(flySpeed * Math.exp(-px * SPEED_K), MIN_FLY_SPEED, MAX_FLY_SPEED)
+        return
+      }
+      zoomBy(px, FLY_DOLLY_K)
+      return
+    }
+
+    /* --- two-finger scroll -------------------------------------------------
+     * Vertical zooms, and horizontal pans by the same distance the drag would:
+     * `inPanX` is in CSS pixels, which is exactly what the delta already is. */
+    const pxX = wheelPixelsX(e)
+    if (pxX !== 0) inPanX += pxX
+    if (px !== 0) {
+      ndcFromEvent(e)
+      zoomBy(px, ZOOM_K)
+    }
+  }
+
+  /* --- Safari's pinch ------------------------------------------------------
+   * `gesturechange` gives an absolute scale since the gesture began, so it is
+   * differentiated here into the same per-event factor the wheel path uses. */
+
+  let gestureScale = 1
+
+  function onGestureStart(ev: Event): void {
+    const g = ev as GestureEventLike
+    ev.preventDefault()
+    interrupt()
+    gestureScale = g.scale || 1
+  }
+
+  function onGestureChange(ev: Event): void {
+    const g = ev as GestureEventLike
+    ev.preventDefault()
+    const s = g.scale || 1
+    const step = s / (gestureScale || 1)
+    gestureScale = s
+    if (!isFinite(step) || step <= 0) return
+    ndcFromEvent(g)
+    // Pinching apart means "closer", which is a smaller orbit distance.
+    if (mode === 'fly') pendingFlyDolly += (step - 1) * flySpeed * 6
+    else pendingZoom /= step
+  }
+
+  function onGestureEnd(ev: Event): void {
+    ev.preventDefault()
+    gestureScale = 1
   }
 
   function onKeyDown(e: KeyboardEvent): void {
@@ -547,6 +672,11 @@ export function createCameraRig(
   domElement.addEventListener('pointerup', onPointerUp)
   domElement.addEventListener('pointercancel', onPointerUp)
   domElement.addEventListener('wheel', onWheel, { passive: false })
+  // Safari only. Elsewhere these never fire and cost nothing; there they are the
+  // difference between a pinch that zooms and a pinch that resizes the page.
+  domElement.addEventListener('gesturestart', onGestureStart, { passive: false })
+  domElement.addEventListener('gesturechange', onGestureChange, { passive: false })
+  domElement.addEventListener('gestureend', onGestureEnd, { passive: false })
   window.addEventListener('keydown', onKeyDown)
   window.addEventListener('keyup', onKeyUp)
   window.addEventListener('blur', onBlur)
@@ -715,6 +845,16 @@ export function createCameraRig(
     }
 
     camera.position.addScaledVector(flyVel, dt)
+
+    // The wheel's and the pinch's travel, applied as a whole impulse along the
+    // view axis. Same clamps as the keys, so the wheel cannot put the camera
+    // somewhere WASD could not.
+    if (pendingFlyDolly !== 0) {
+      _fwd.set(0, 0, -1).applyQuaternion(camera.quaternion)
+      camera.position.addScaledVector(_fwd, pendingFlyDolly)
+      pendingFlyDolly = 0
+    }
+
     camera.position.x = clamp(camera.position.x, -LIMIT_XZ, LIMIT_XZ)
     camera.position.y = clamp(camera.position.y, LIMIT_Y_LO, LIMIT_Y_HI)
     camera.position.z = clamp(camera.position.z, -LIMIT_XZ, LIMIT_XZ)
@@ -906,6 +1046,9 @@ export function createCameraRig(
     domElement.removeEventListener('pointerup', onPointerUp)
     domElement.removeEventListener('pointercancel', onPointerUp)
     domElement.removeEventListener('wheel', onWheel)
+    domElement.removeEventListener('gesturestart', onGestureStart)
+    domElement.removeEventListener('gesturechange', onGestureChange)
+    domElement.removeEventListener('gestureend', onGestureEnd)
     window.removeEventListener('keydown', onKeyDown)
     window.removeEventListener('keyup', onKeyUp)
     window.removeEventListener('blur', onBlur)
