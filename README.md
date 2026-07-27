@@ -2,6 +2,9 @@
 
 **An explorable 3D cluster that shows how ClickHouse actually works.**
 
+**[slach.github.io/CHSimCity](https://slach.github.io/CHSimCity/)** — it runs in
+the browser, with no server behind it.
+
 Four data nodes, three Keeper nodes, and one `Distributed` table in front of
 them. Every structure is one real mechanism: the towers in the middle of each
 island are `system.parts`, and a part's **height is its row count** and its
@@ -44,6 +47,18 @@ npm test
 ```
 
 No server, no database, no network calls. It is a single static bundle.
+
+### Publishing
+
+`.github/workflows/pages.yml` builds `main` and deploys `dist/` to GitHub Pages.
+Typecheck and the test suite run first, and a failure in either stops the
+deploy.
+
+It needs **Settings → Pages → Source: GitHub Actions** set once on the
+repository; nothing else. `base: './'` in `vite.config.ts` makes every asset URL
+relative to the page, so the same `dist/` works unchanged at a project subpath,
+at a user page, and from a `file://` URL — the repository name is not baked in
+anywhere.
 
 ---
 

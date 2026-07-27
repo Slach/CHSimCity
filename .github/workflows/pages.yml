@@ -1,0 +1,68 @@
+name: Pages
+
+# Publish the static bundle to https://slach.github.io/CHSimCity/
+#
+# The build is gated: typecheck and the test suite run before `vite build`, and
+# a failure in either stops the deploy. A visualisation that is wrong is worse
+# than one that is missing, and the published page is the only copy most people
+# will ever see.
+#
+# `vite.config.ts` sets `base: './'`, so every asset URL in the bundle is
+# relative to the page. That is what makes the same `dist/` work unchanged at a
+# project subpath, at a user page, and from a file:// URL — no repository name
+# is baked in anywhere, and renaming the repository does not break the deploy.
+
+on:
+  push:
+    branches: [main]
+  # So the site can be republished without a commit — after enabling Pages for
+  # the first time, for instance.
+  workflow_dispatch:
+
+# Read the repository, mint the token `deploy-pages` needs, and nothing else.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time, and never cancel one in flight: a half-uploaded
+# artifact would leave the live site broken. Queued runs supersede each other
+# instead.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      # `ci`, not `install`: the lockfile is the input, and a deploy must not
+      # silently pick up a version nobody has run locally.
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      - run: npm test
+
+      - run: npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4
