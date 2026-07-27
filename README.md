@@ -5,6 +5,14 @@
 **[slach.github.io/CHSimCity](https://slach.github.io/CHSimCity/)** — it runs in
 the browser, with no server behind it.
 
+[![CHSimCity: one server's parts yard at night, with system.parts towers, the
+mark cache and a running merge](docs/screenshot.png)](https://slach.github.io/CHSimCity/)
+
+One server's parts yard in the night theme: each tower is a row in
+`system.parts`, coloured by its state; the yellow slab behind it is the mark
+cache, and `system.merges` in the foreground had one merge running when the shot
+was taken.
+
 Four servers, three Keeper nodes, and a `Distributed` table on every one of
 them. Every structure is one real mechanism: the towers in the middle of each
 island are `system.parts`, and a part's **height is its row count** and its
