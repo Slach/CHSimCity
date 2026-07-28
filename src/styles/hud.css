@@ -559,8 +559,10 @@ body.ch-paused .hud-dock {
   position: relative;
   /* Widened from 190 when the four servers went from a 2x2 square into a row:
      the world went from 720 units across to 1460, and at the old width an
-     island was 30 CSS pixels — too small to tell a parts yard from a pit. */
-  width: 250px;
+     island was 30 CSS pixels — too small to tell a parts yard from a pit. The
+     second step, 250 to 300, bought back the CLIENTS label, which is the
+     narrowest district on the map and stopped fitting its own box. */
+  width: 300px;
   background: var(--bg-panel);
   backdrop-filter: blur(6px);
   padding: 6px 6px 4px;
@@ -568,14 +570,14 @@ body.ch-paused .hud-dock {
 .map__c {
   display: block;
   width: 100%;
-  /* 238 CSS pixels of usable width, and the built world is 1460 units across by
+  /* 288 CSS pixels of usable width, and the built world is 1460 units across by
      910 deep — the four servers stand in a row, so the plan is now WIDER than it
      is deep, where it used to be the other way round. The projection inside is
      uniform, so a box of the wrong aspect does not stretch the map, it surrounds
      it with empty ground: at the 168px an early version used, the whole cluster
      was squeezed into a narrow strip down the middle of the canvas.
      `test/minimap.test.ts` keeps this number honest against `world/layout.ts`. */
-  height: 148px;
+  height: 180px;
 }
 .map__cap {
   font-family: var(--f-mono);

@@ -34,6 +34,11 @@ import type { UiContext, UiModule } from './uikit'
 /** Padding inside the canvas, in CSS pixels. */
 const PAD = 7
 
+const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace'
+const LABEL_FONT = `600 7px ${MONO}`
+/** One step down, for a district too narrow to hold its name at full size. */
+const LABEL_FONT_SMALL = `600 6px ${MONO}`
+
 /** Everything the map has to hold, in world units. Derived, never transcribed. */
 const WORLD = (() => {
   // DISTRICT_BOUNDS.world is deliberately generous — it is the picking
@@ -108,9 +113,9 @@ export function createMinimap(ctx: UiContext): UiModule {
   }
 
   /* --- world → map projection --------------------------------------------
-   * North is up, east is right, and the scale is uniform so the plan is not
-   * distorted: a square island has to look square or the map is lying about
-   * the geography it exists to convey. */
+   * The scale is uniform so the plan is not distorted: a square island has to
+   * look square or the map is lying about the geography it exists to convey.
+   * Which way up it is, and why, is the block below `computeProjection`. */
 
   let scale = 1
   let originX = 0
@@ -229,12 +234,26 @@ export function createMinimap(ctx: UiContext): UiModule {
     g.lineWidth = emphasis > 1 ? 1.5 : 1
     g.strokeRect(px + 0.5, py + 0.5, pw - 1, ph - 1)
 
-    // Measured, not estimated from the character count: a label that overflows
-    // its footprint by two pixels is worse than no label, and the monospace
-    // assumption is one theme change away from being wrong.
-    if (ph > 9 && g.measureText(name).width + 6 < pw) {
+    /* Measured, not estimated from the character count: a label that overflows
+     * its footprint by two pixels is worse than no label, and the monospace
+     * assumption is one theme change away from being wrong.
+     *
+     * It gets a second measurement one size down before it gives up. The row
+     * arrangement widened the world from 720 units to 1460 and took the scale
+     * with it, and CLIENTS — a genuinely narrow district — stopped fitting at
+     * the full size by two pixels. Dropping it left the map with the pale
+     * unlabelled box this function exists to avoid. */
+    const fits = (): boolean => g.measureText(name).width + 6 < pw
+    let sized = ph > 9 && fits()
+    if (ph > 9 && !sized) {
+      g.font = LABEL_FONT_SMALL
+      sized = fits()
+      if (!sized) g.font = LABEL_FONT
+    }
+    if (sized) {
       g.fillStyle = withAlpha(color, 0.95)
       g.fillText(name, px + pw / 2, py + ph / 2)
+      g.font = LABEL_FONT
     }
     hotspots.push({ id, label: caption, x: px, y: py, w: pw, h: ph })
   }
@@ -247,7 +266,7 @@ export function createMinimap(ctx: UiContext): UiModule {
 
     g.setTransform(dpr, 0, 0, dpr, 0, 0)
     g.clearRect(0, 0, cssW, cssH)
-    g.font = '600 7px ui-monospace, SFMono-Regular, Menlo, monospace'
+    g.font = LABEL_FONT
     g.textAlign = 'center'
     g.textBaseline = 'middle'
 
@@ -399,7 +418,7 @@ export function createMinimap(ctx: UiContext): UiModule {
      * `N ▼`, not `N ▲`: the map is south-up so it agrees with the scene, and a
      * compass that still claimed north was up would make it a wrong map rather
      * than a turned one. */
-    g.font = '600 8px ui-monospace, SFMono-Regular, Menlo, monospace'
+    g.font = `600 8px ${MONO}`
     g.textBaseline = 'top'
     g.textAlign = 'left'
     g.fillStyle = withAlpha(cssColor('inkDim'), 0.8)
