@@ -104,13 +104,22 @@ const PATH_EASE = 0.18
  * serves a statement is the application's choice — which is a fact about this
  * end of the world, so this is the end to stand at.
  *
- * The distance is derived, not guessed. The built cluster runs z = -470 .. +400,
- * 870 units deep, and at this camera's 52° vertical field of view the vertical
- * extent covered at distance d is 2·d·tan(26°) ≈ 0.98·d — so ~1050 units of
- * distance is what holds 870 with a margin. Pull the camera in and the Keeper
- * quorum leaves the frame; push it out and the islands stop being readable.
+ * The distance is derived, not guessed, and since the four servers went into a
+ * row it is WIDTH that governs it, not depth. The built cluster runs
+ * x = -700 .. +700 and z = -470 .. +400: 1400 across against 870 deep. At this
+ * camera's 52° vertical field of view the vertical extent covered at distance d
+ * is 2·d·tan(26°) ≈ 0.98·d, and the horizontal is that times the aspect ratio —
+ * so at a 16:10 window ~1400/(0.98·1.6) ≈ 890 holds the width and ~1050 holds
+ * the depth, and the frame is set by whichever is larger at the window in front
+ * of you. ~1150 covers both with a margin. Pull in and an end shard leaves the
+ * frame; push out and the islands stop being readable.
+ *
+ * The eye sits only slightly west of the axis. It used to be well off to one
+ * side, which was a good three-quarter view of a square; against a row it turns
+ * the near shard into a wall in front of the far one and hides the very gap the
+ * row exists to show.
  */
-const HOME_POS = new THREE.Vector3(-180, 520, -900)
+const HOME_POS = new THREE.Vector3(-80, 470, -880)
 const HOME_PIVOT = new THREE.Vector3(0, 0, -20)
 
 const CLUSTER_CENTER = new THREE.Vector3(

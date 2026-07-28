@@ -26,6 +26,9 @@ import type { UiContext, UiModule } from './uikit'
  *
  * Click a district to fly to it; click the empty ground to go back to the
  * establishing shot.
+ *
+ * The plan is SOUTH-UP, so it faces the same way the viewer does rather than
+ * the same way a compass does. See the projection below for why.
  * ==========================================================================*/
 
 /** Padding inside the canvas, in CSS pixels. */
@@ -123,8 +126,31 @@ export function createMinimap(ctx: UiContext): UiModule {
     originY = PAD + (h - spanZ * scale) / 2 - WORLD.z0 * scale
   }
 
-  const mx = (worldX: number): number => originX + worldX * scale
-  const my = (worldZ: number): number => originY + worldZ * scale
+/* THE MAP IS SOUTH-UP, which is to say it is turned to face the way the viewer
+ * does. The establishing shot stands north of the clients looking SOUTH, so on
+ * screen the far distance is south and east is to the LEFT. A north-up plan is
+ * the same picture rotated by half a turn, and the four servers standing in a
+ * row is what made that unaffordable: the map read `CH-S2R2 … CH-S1R1` while the
+ * scene behind it read `ch-s1r1 … ch-s2r2`, and clicking the leftmost box on the
+ * map flew you to the rightmost island on screen.
+ *
+ * This is a ROTATION and not a mirror — both axes reverse together. A mirrored
+ * plan would agree with the screen just as well and would be a lie about which
+ * hand the world is built with. The compass says `N ▼` because north really is
+ * at the bottom now; that is the price, and it is cheaper than a map that
+ * disagrees with the window above it. */
+  const mx = (worldX: number): number => originX + (WORLD.x0 + WORLD.x1 - worldX) * scale
+  const my = (worldZ: number): number => originY + (WORLD.z0 + WORLD.z1 - worldZ) * scale
+
+  /** A world-space box as a screen rect. Either axis reverses under the turn,
+   *  so a rect cannot be built from one corner and a positive span any more. */
+  const rect = (x0: number, z0: number, x1: number, z1: number): [number, number, number, number] => {
+    const ax = mx(x0)
+    const bx = mx(x1)
+    const ay = my(z0)
+    const by = my(z1)
+    return [Math.min(ax, bx), Math.min(ay, by), Math.abs(bx - ax), Math.abs(by - ay)]
+  }
 
   /* --- health -------------------------------------------------------------
    * One node, one colour, and the WORST signal wins. A node that is up but
@@ -191,10 +217,11 @@ export function createMinimap(ctx: UiContext): UiModule {
     color: string,
     emphasis = 1,
   ): void {
-    const px = mx(x0)
-    const py = my(z0)
-    const pw = Math.max(3, mx(x1) - px)
-    const ph = Math.max(3, my(z1) - py)
+    const [rx, ry, rw, rh] = rect(x0, z0, x1, z1)
+    const px = rx
+    const py = ry
+    const pw = Math.max(3, rw)
+    const ph = Math.max(3, rh)
 
     g.fillStyle = withAlpha(color, 0.2 * emphasis)
     g.fillRect(px, py, pw, ph)
@@ -227,14 +254,13 @@ export function createMinimap(ctx: UiContext): UiModule {
     /* --- the extent of the built world, as a faint frame ------------------ */
     g.strokeStyle = withAlpha(cssColor('grid'), 0.75)
     g.lineWidth = 1
-    g.strokeRect(
-      mx(WORLD.x0) + 0.5,
-      my(WORLD.z0) + 0.5,
-      (WORLD.x1 - WORLD.x0) * scale - 1,
-      (WORLD.z1 - WORLD.z0) * scale - 1,
-    )
+    {
+      const [x, y, w, h] = rect(WORLD.x0, WORLD.z0, WORLD.x1, WORLD.z1)
+      g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1)
+    }
 
-    /* --- north to south, which is also the order data travels ------------- */
+    /* --- north to south, which is also the order data travels, and on this
+     * south-up map is also bottom to top --------------------------------- */
     const cb = DISTRICT_BOUNDS.clients
     district(g, 'clients', 'CLIENTS', 'Application tier', cb.x[0], cb.z[0], cb.x[1], cb.z[1], cssColor('client'))
 
@@ -249,7 +275,10 @@ export function createMinimap(ctx: UiContext): UiModule {
     const nb = DISTRICT_BOUNDS.nodes
     g.strokeStyle = withAlpha(cssColor('grid'), 0.9)
     g.lineWidth = 1
-    g.strokeRect(mx(nb.x[0]) + 0.5, my(nb.z[0]) + 0.5, (nb.x[1] - nb.x[0]) * scale - 1, (nb.z[1] - nb.z[0]) * scale - 1)
+    {
+      const [x, y, w, h] = rect(nb.x[0], nb.z[0], nb.x[1], nb.z[1])
+      g.strokeRect(x + 0.5, y + 0.5, w - 1, h - 1)
+    }
 
     const halfW = CITY.node.w / 2
     const halfD = CITY.node.d / 2
@@ -332,10 +361,14 @@ export function createMinimap(ctx: UiContext): UiModule {
 
     g.save()
     g.translate(px, py)
-    // Screen space: +x is world east and +y is world south. `cam.yaw` is
-    // clockwise from north, so rotating by it and drawing the arc centred on
-    // -y (north) points the cone where the camera looks.
-    g.rotate(cam.yaw)
+    // Screen space: +x is world WEST and +y is world NORTH, because the plan is
+    // turned half a turn. `cam.yaw` is clockwise from north, and half a turn is
+    // a rotation, so a bearing survives it intact and simply gains 180°: rotate
+    // by that and the arc still drawn on -y points where the camera looks.
+    // Drop the half turn and the cone points exactly backwards, which is the
+    // failure this convention comment exists to prevent — it has happened once
+    // already, from the sign of the heading.
+    g.rotate(cam.yaw + Math.PI)
     const grad = g.createRadialGradient(0, 0, 0, 0, 0, reach)
     grad.addColorStop(0, withAlpha(accent, 0.34))
     grad.addColorStop(1, withAlpha(accent, 0))
@@ -362,12 +395,15 @@ export function createMinimap(ctx: UiContext): UiModule {
     g.lineWidth = 1
     g.stroke()
 
-    /* --- chrome: which way is north, and which camera you are driving ----- */
+    /* --- chrome: which way is north, and which camera you are driving -----
+     * `N ▼`, not `N ▲`: the map is south-up so it agrees with the scene, and a
+     * compass that still claimed north was up would make it a wrong map rather
+     * than a turned one. */
     g.font = '600 8px ui-monospace, SFMono-Regular, Menlo, monospace'
     g.textBaseline = 'top'
     g.textAlign = 'left'
     g.fillStyle = withAlpha(cssColor('inkDim'), 0.8)
-    g.fillText('N ▲', 4, 3)
+    g.fillText('N ▼', 4, 3)
     g.textAlign = 'right'
     g.textBaseline = 'bottom'
     g.fillStyle = withAlpha(accent, 0.9)

@@ -97,6 +97,65 @@ describe('the cluster plan', () => {
     void half
   })
 
+  /* --- the row ------------------------------------------------------------
+   * The four servers stand in one row, paired, and the arrangement carries the
+   * whole of the shard boundary: two islands close together are one shard's
+   * replicas, and the wide channel is the line data does not cross except as a
+   * query fan-out. Both facts below are what a viewer is being asked to read
+   * off the geometry, so both are asserted rather than trusted to a constant. */
+
+  it('all four servers are on one line', () => {
+    const z = nodeOrigin(0)[2]
+    for (let n = 1; n < N_NODES; n++) expect(nodeOrigin(n)[2]).toBe(z)
+  })
+
+  it('the shard channel is far wider than the gap inside a shard', () => {
+    const gapBetween = (a: number, b: number): number =>
+      Math.abs(nodeOrigin(a)[0] - nodeOrigin(b)[0]) - CITY.node.w
+
+    for (let n = 0; n < N_NODES; n++) {
+      const withinShard = gapBetween(n, siblingOf(n))
+      for (let m = 0; m < N_NODES; m++) {
+        if (shardOf(m) === shardOf(n)) continue
+        expect(
+          gapBetween(n, m),
+          `${nodeHost(n)} is no further from ${nodeHost(m)} than from its own replica`,
+        ).toBeGreaterThan(withinShard * 2)
+      }
+      expect(withinShard, 'replicas of one shard must not touch').toBeGreaterThan(0)
+    }
+  })
+
+  it('the row reads in index order from the establishing shot', () => {
+    // The home camera looks SOUTH, so +x is screen LEFT and the row is read in
+    // DESCENDING x. Get this backwards and the labels run ch-s2r2 … ch-s1r1
+    // across the opening frame, which is the cluster walked backwards.
+    for (let n = 1; n < N_NODES; n++) {
+      expect(nodeOrigin(n)[0], `${nodeHost(n)} is not left of ${nodeHost(n - 1)}`).toBeLessThan(
+        nodeOrigin(n - 1)[0],
+      )
+    }
+  })
+
+  it('a fetch wire goes around the islands, never through one', () => {
+    // The replicas of a shard are now side by side, so the straight line
+    // between them crosses both. Only the two ENDS of the wire may be on an
+    // island — every waypoint between them has to be outside all four.
+    const halfW = CITY.node.w / 2
+    const halfD = CITY.node.d / 2
+    for (let from = 0; from < N_NODES; from++) {
+      const to = siblingOf(from)
+      const pts = ROUTES[rid.fetchPart(from, to)].points
+      for (const p of pts.slice(1, -1)) {
+        for (let n = 0; n < N_NODES; n++) {
+          const o = nodeOrigin(n)
+          const inside = Math.abs(p[0] - o[0]) < halfW && Math.abs(p[2] - o[2]) < halfD
+          expect(inside, `fetch ${from}→${to} passes through ${nodeHost(n)} at ${p}`).toBe(false)
+        }
+      }
+    }
+  })
+
   it('every part slot has a distinct position inside the deck', () => {
     const seen = new Set<string>()
     const halfW = CITY.yard.deckW / 2

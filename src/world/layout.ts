@@ -22,14 +22,23 @@ import type { RouteDef, TableDef } from '../core/types'
  *                CLIENT TERMINAL   z ≈ -430    (outside the cluster)
  *                DISTRIBUTED       z ≈ -300    the initiator node
  *
- *      shard 0 / replica 0                      shard 1 / replica 0
- *      x = -190   z = -80                       x = +190   z = -80
+ *   ┌───────── shard 0 ─────────┐             ┌───────── shard 1 ─────────┐
+ *   ch-s1r1        ch-s1r2                    ch-s2r1        ch-s2r2
+ *   x = +515       x = +225                   x = -225       x = -515
+ *                              all four at z = +30
  *
- *      shard 0 / replica 1                      shard 1 / replica 1
- *      x = -190   z = +140                      x = +190   z = +140
+ * Those x run east to WEST, because the establishing shot looks south and this
+ * is the order the row is read on screen, left to right. See `SHARD_X`.
  *
  *                KEEPER QUORUM     z ≈ +330    three raft nodes
  *                                 ▼ +Z  (south)
+ *
+ * The four servers stand in ONE ROW, paired. They used to sit in a 2x2 square,
+ * where the horizontal split was the shard and the vertical split the replica —
+ * two axes carrying two different meanings, which is a thing a viewer has to be
+ * told rather than see. A row carries one: distance. Two islands 40 units apart
+ * are the replicas of one shard, and the 200-unit channel is the shard boundary,
+ * the only line in this world that data does not cross by replication.
  *
  * Each data node is an island built entirely in LOCAL coordinates inside its own
  * group. Anything that needs a world position — a route, a camera focus, a
@@ -94,10 +103,43 @@ export const CITY = {
  * Node placement.
  * ------------------------------------------------------------------------*/
 
-/** Shards run east–west; the western shard is shard 0. */
-export const SHARD_X: readonly number[] = [-190, 190]
-/** Replicas run north–south; replica 0 is the northern one. */
-export const REPLICA_Z: readonly number[] = [-80, 140]
+/**
+ * The row, as it is read on screen. Both spacings are centre-to-centre between islands
+ * `CITY.node.w` = 250 wide, so what the eye reads is the GAP: 40 units inside a
+ * shard, 200 between them. The ratio is the whole point of the arrangement and
+ * the reason neither number is merely "wide enough" — a replica pair has to look
+ * like one thing, and the channel between the shards like a boundary.
+ */
+const REPLICA_PITCH = 290
+const SHARD_GAP = 200
+
+/** Half the span of one shard's pair, edge to edge. */
+const HALF_PAIR = (REPLICA_PITCH + CITY.node.w) / 2
+
+/**
+ * A shard's CENTRE — the empty channel between its two replicas, not either
+ * island.
+ *
+ * Shard 0 is the EASTERN one, and inside a shard replica 0 is the eastern too,
+ * which looks backwards written down and is right on screen. The establishing
+ * shot stands north of the clients looking SOUTH, so +x is to the viewer's LEFT,
+ * and this ordering is what makes the row read `ch-s1r1 ch-s1r2 | ch-s2r1
+ * ch-s2r2` from left to right. With the indices running west-to-east the row
+ * arrived reversed, and a viewer reading it in order was walking the cluster
+ * backwards.
+ */
+export const SHARD_X: readonly number[] = [HALF_PAIR + SHARD_GAP / 2, -(HALF_PAIR + SHARD_GAP / 2)]
+/** Replicas sit either side of their shard's centre; replica 0 is the eastern. */
+export const REPLICA_DX: readonly number[] = [REPLICA_PITCH / 2, -REPLICA_PITCH / 2]
+
+/** How far the outermost island's CENTRE is from the cluster axis. */
+export const ROW_HALF_SPAN = HALF_PAIR + SHARD_GAP / 2 + REPLICA_PITCH / 2
+/**
+ * Every island is on one line. The row is centred between the clients at
+ * z ≈ -430 and the Keeper quorum at z ≈ +330, so both stay in the establishing
+ * shot at equal depth from it.
+ */
+export const NODE_Z = 30
 
 export const shardOf = (node: number): number => Math.floor(node / N_REPLICAS)
 export const replicaOf = (node: number): number => node % N_REPLICAS
@@ -117,7 +159,7 @@ export function siblingOf(node: number): number {
 
 /** World origin of node `i`'s island. Its group sits here. */
 export function nodeOrigin(node: number): [number, number, number] {
-  return [SHARD_X[shardOf(node)], 0, REPLICA_Z[replicaOf(node)]]
+  return [SHARD_X[shardOf(node)] + REPLICA_DX[replicaOf(node)], 0, NODE_Z]
 }
 
 /** Turn a node-local coordinate into a world coordinate. */
@@ -809,17 +851,26 @@ for (let from = 0; from < N_NODES; from++) {
     if (from === to) continue
     const a = anchorAt(from, 'distTable')
     const b = anchorAt(to, 'distTable')
-    const sameShard = shardOf(from) === shardOf(to)
-    // Lift the two cross-shard diagonals so they do not lie on top of the
-    // shard-local pair and the replication ducts underneath them.
-    const y = sameShard ? 9 : 13
-    // Bow the duct away from the straight line, outward from the cluster's
-    // centre, so four ducts through the middle stay four distinguishable ducts.
+    /* Every front door is now on ONE LINE — same z, four x — so a duct drawn
+     * straight between any two of them lies exactly on top of the ducts between
+     * every other pair. The six of them are therefore drawn as an arc diagram:
+     * each pair bows north in front of the row, by an amount fixed by how far
+     * apart in the row its two ends are. The two shortest arcs are the two
+     * replica pairs, the longest spans the whole cluster, and no two share a
+     * plane. `rank` orders the six pairs by that span:
+     *   gap 1 → 0,1,2   gap 2 → 3,4   gap 3 → 5 */
+    const lo = Math.min(from, to)
+    const gap = Math.abs(from - to)
+    const rank = (gap - 1) * N_NODES - ((gap - 1) * gap) / 2 + lo
+    // A duct must clear the tallest thing on an island; ranking it again in y
+    // is what keeps the two equal-span arcs (0↔2 and 1↔3) off each other, since
+    // their x ranges overlap through the middle of the row.
+    const y = 9 + rank * 4
     const bow = (dy: number): [number, number, number][] => {
       const mid: [number, number, number] = [
-        (a[0] + b[0]) / 2 + (sameShard ? (shardOf(from) === 0 ? -34 : 34) : 0),
+        (a[0] + b[0]) / 2,
         y + dy + 4,
-        (a[2] + b[2]) / 2 - (sameShard ? 0 : 26 + 8 * replicaOf(from)),
+        (a[2] + b[2]) / 2 - (40 + 24 * rank),
       ]
       return [
         [a[0], y + dy, a[2] + 6],
@@ -1064,8 +1115,11 @@ for (let n = 0; n < N_NODES; n++) {
 
 for (let n = 0; n < N_NODES; n++) {
   const q = anchorAt(n, 'replicationQueue')
-  const west = shardOf(n) === 0
-  const lane = west ? -1 : 1
+  // One lane per SERVER, not per shard, and it follows the server's own place
+  // in the row so no two sessions cross. Keeper is an ensemble every server
+  // talks to individually; two servers sharing a lane drew one wire where the
+  // model has two sessions.
+  const lane = nodeOrigin(n)[0] / ROW_HALF_SPAN
 
   route(
     rid.nodeToKeeper(n),
@@ -1099,15 +1153,23 @@ for (let s = 0; s < N_SHARDS; s++) {
       const to = nodeIndex(s, b)
       const fy = anchorAt(from, 'partsYard')
       const ty = anchorAt(to, 'insertDock')
-      const west = s === 0
-      const outboard = (west ? -1 : 1) * 122
+      /* The two replicas are now side by side, so a straight wire between them
+       * would run through both islands. It goes around instead: south out of the
+       * yard, west or east along a lane behind the pair, then up the DESTINATION's
+       * outer flank to its dock. Which flank is decided by the direction of
+       * travel, so the two wires of a pair are mirror images and neither hides
+       * the other — the old pair shared one lane and read as a single cable. */
+      const flank = ty[0] > fy[0] ? 1 : -1
+      const laneZ = NODE_Z + CITY.node.d / 2 + 34
+      const flankX = ty[0] + flank * (CITY.node.w / 2 + 22)
       route(
         rid.fetchPart(from, to),
         [
-          [fy[0] + outboard * 0.55, 6, fy[2] + 30],
-          [SHARD_X[s] + outboard, 7, (fy[2] + ty[2]) / 2],
-          [ty[0] + outboard * 0.55, 7, ty[2] - 18],
-          [ty[0] - 6, 6, ty[2] - 6],
+          [fy[0], 6, fy[2] + 34],
+          [fy[0] + (flankX - fy[0]) * 0.2, 7, laneZ],
+          [flankX, 7, laneZ],
+          [flankX, 7, ty[2] - 22],
+          [ty[0] + flank * 10, 6, ty[2] - 8],
         ],
         { color: COLOR.fetch, speed: 100, size: 1.35, visible: true, roadOpacity: 0.15 },
       )
@@ -1185,11 +1247,23 @@ export interface Bounds {
   z: [number, number]
 }
 
+/* The node row is DERIVED. Transcribing it was survivable while the islands sat
+ * in a square whose corners never moved; the moment the row's spacing became two
+ * named constants, a hand-written box here is a second, silently stale answer to
+ * a question `nodeOrigin` already answers. `margin` covers the fetch wires that
+ * loop around the outer flank of the end islands. */
+const NODES_BOUNDS: Bounds = (() => {
+  const margin = 60
+  const halfD = CITY.node.d / 2 + margin
+  const x = ROW_HALF_SPAN + CITY.node.w / 2 + margin
+  return { x: [-x, x], z: [NODE_Z - halfD, NODE_Z + halfD] }
+})()
+
 /** Every district's bounding footprint. */
 export const DISTRICT_BOUNDS: Record<string, Bounds> = {
   clients: { x: [-90, 90], z: [-470, -390] },
   distributed: { x: [-120, 120], z: [-360, -250] },
-  nodes: { x: [-330, 330], z: [-200, 260] },
+  nodes: NODES_BOUNDS,
   keeper: { x: [-140, 140], z: [280, 380] },
-  world: { x: [-700, 700], z: [-560, 480] },
-} as const
+  world: { x: [NODES_BOUNDS.x[0] - 120, NODES_BOUNDS.x[1] + 120], z: [-560, 480] },
+}

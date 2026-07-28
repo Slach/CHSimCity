@@ -64,7 +64,9 @@ export const DOCS: ComponentDoc[] = [
 
 North, outside the cluster, is the **application tier**. It talks to exactly one thing: the **Distributed** table on the initiator, which stores nothing and routes everything.
 
-The four islands are the data nodes — two shards, two replicas each. Read one island west to east and you have read the whole of a \`MergeTree\`: a block arrives at the **insert dock**, is sorted and written as a **part**, joins the **parts yard**, is found again through the **primary index** and the **skip indexes**, is read by the **read pool**, and is eventually consolidated by the **merge gantry** or emptied by the **TTL works**.
+The four islands are the data nodes, standing in one row and paired: two islands close together are the two **replicas** of one shard, holding the same rows, and the wide channel between the pairs is the **shard boundary**. That channel is the only line in this cluster data never crosses — a part is fetched across the narrow gap and never across the wide one. A SELECT does cross it, but as a question, not as data.
+
+Read one island west to east and you have read the whole of a \`MergeTree\`: a block arrives at the **insert dock**, is sorted and written as a **part**, joins the **parts yard**, is found again through the **primary index** and the **skip indexes**, is read by the **read pool**, and is eventually consolidated by the **merge gantry** or emptied by the **TTL works**.
 
 South is the **Keeper quorum**. It holds no user data at all — only metadata — and every write in the cluster depends on it.`,
       },

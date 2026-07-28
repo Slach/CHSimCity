@@ -557,7 +557,10 @@ body.ch-paused .hud-dock {
 .map {
   pointer-events: auto;
   position: relative;
-  width: 190px;
+  /* Widened from 190 when the four servers went from a 2x2 square into a row:
+     the world went from 720 units across to 1460, and at the old width an
+     island was 30 CSS pixels — too small to tell a parts yard from a pit. */
+  width: 250px;
   background: var(--bg-panel);
   backdrop-filter: blur(6px);
   padding: 6px 6px 4px;
@@ -565,14 +568,14 @@ body.ch-paused .hud-dock {
 .map__c {
   display: block;
   width: 100%;
-  /* 178 CSS pixels of usable width, and the built world is 720 units across by
-     910 deep — the clients terminal sits a long way north of the shards, so the
-     plan is DEEPER than it is wide. The projection inside is uniform, so a box
-     of the wrong aspect does not stretch the map, it surrounds it with empty
-     ground: at the 168px this used to be, the whole cluster was squeezed into a
-     narrow strip down the middle of the canvas. `map-aspect.test.ts` keeps this
-     number honest against `world/layout.ts`. */
-  height: 225px;
+  /* 238 CSS pixels of usable width, and the built world is 1460 units across by
+     910 deep — the four servers stand in a row, so the plan is now WIDER than it
+     is deep, where it used to be the other way round. The projection inside is
+     uniform, so a box of the wrong aspect does not stretch the map, it surrounds
+     it with empty ground: at the 168px an early version used, the whole cluster
+     was squeezed into a narrow strip down the middle of the canvas.
+     `test/minimap.test.ts` keeps this number honest against `world/layout.ts`. */
+  height: 148px;
 }
 .map__cap {
   font-family: var(--f-mono);

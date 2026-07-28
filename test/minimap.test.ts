@@ -72,12 +72,14 @@ describe('the minimap canvas', () => {
     expect(Math.abs(canvasH - wanted)).toBeLessThan(1.5)
   })
 
-  it('is taller than it is wide, because the clients sit far north of the shards', () => {
-    // Not a restatement of the test above: it is the specific fact the old
-    // comment in the stylesheet got backwards.
+  it('is wider than it is tall, because the four servers stand in a row', () => {
+    // Not a restatement of the test above: it is the specific fact the
+    // stylesheet's comment has now got backwards twice. It read "deeper than
+    // wide" while the servers were a 2x2 square, which was true then; the row
+    // made the world 1460 across against 910 deep and inverted it.
     const world = worldExtent()
-    expect(world.d).toBeGreaterThan(world.w)
-    expect(canvasH).toBeGreaterThan(canvasW)
+    expect(world.w).toBeGreaterThan(world.d)
+    expect(canvasW).toBeGreaterThan(canvasH)
   })
 
   it('leaves room for itself above the transport dock', () => {

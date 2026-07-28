@@ -109,7 +109,7 @@ The geography is the order things happen in.
 |---|---|
 | **Client terminal** (north, outside) | The application tier. It knows one table name and nothing about shards |
 | **Distributed strip** (on each island) | Not a district — a table on every server. The hash wheel is the sharding key; the silos are that server's own background insert spool; the merge floor is where it combines partial results |
-| **Four islands** | Two shards, two replicas. Each is one ClickHouse server |
+| **Four islands** (a row, in pairs) | Each is one ClickHouse server. Two islands close together are the two replicas of one shard; the wide channel between the pairs is the shard boundary, and a part is fetched across the narrow gap but never across the wide one |
 | **Keeper quorum** (south) | Three raft nodes. Metadata only — and every write depends on them |
 
 Inside one island, west to east:
@@ -259,3 +259,7 @@ as endorsed by them.
 ClickHouse is a trademark of ClickHouse, Inc. CHSimCity is an independent
 educational project and is not affiliated with, sponsored by, or endorsed by
 ClickHouse, Inc.
+
+The favicon is the Altinity mark. Altinity® is a registered trademark of
+Altinity, Inc., and the mark is used with permission; it is not covered by the
+Apache-2.0 licence over the rest of this repository.
