@@ -494,12 +494,18 @@
    The two side panels: the console (left) and the inspector (right).
    ==========================================================================*/
 
+/* The cap has to be an absolute length that the PANEL can also see. A
+   `max-height: 100%` on the panel resolved against a flex parent whose own
+   height is auto is indefinite, so it computed to none: the console and the
+   inspector grew as tall as their content and ran off the bottom of the
+   viewport with no scrollbar. Both read the same custom property instead. */
 .chc-host {
+  --chc-max-h: calc(100vh - 190px - var(--safe-t) - var(--safe-b));
   pointer-events: none;
   display: flex;
   align-items: flex-start;
   gap: 8px;
-  max-height: calc(100vh - 190px - var(--safe-t) - var(--safe-b));
+  max-height: var(--chc-max-h);
 }
 .chc-host--right {
   flex-direction: row-reverse;
@@ -536,7 +542,7 @@
   transition:
     width var(--dur) var(--ease),
     opacity var(--dur-fast) var(--ease);
-  max-height: 100%;
+  max-height: var(--chc-max-h);
 }
 .chc-host.is-open .chc-panel {
   opacity: 1;
