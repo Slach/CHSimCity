@@ -19,6 +19,7 @@ const CAMERA_KEYS: [string, string][] = [
   ['Pinch', 'Zoom, on a trackpad or a touchscreen'],
   ['Touch', '1 finger pans · 2 fingers pinch to zoom, twist to turn'],
   ['Click', 'Select a structure · double-click to fly to it'],
+  ['Click a moving packet', 'What it is, where it came from and where it is going — and its whole duct lights up'],
   ['W A S D / arrows', 'Move'],
   ['PageUp / PageDown', 'Change altitude'],
   ['Shift · Alt', 'Boost · precision'],

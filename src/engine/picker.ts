@@ -3,6 +3,7 @@ import * as THREE from 'three'
 import type { Registry } from '../core/registry'
 import type { Bus, ComponentDef, DistrictId, ThemeApi } from '../core/types'
 import { clamp } from '../core/util'
+import type { FlowPick, FlowsApi } from './flows'
 
 /* ============================================================================
  * PICKER — pointing at the cluster.
@@ -182,8 +183,10 @@ export function createPicker(opts: {
   registry: Registry
   bus: Bus
   theme: ThemeApi
+  /** Optional: without it, packets simply are not pickable. */
+  flows?: FlowsApi
 }): PickerApi {
-  const { dom, camera, registry, bus, theme } = opts
+  const { dom, camera, registry, bus, theme, flows } = opts
 
   const group = new THREE.Group()
   group.name = 'picker'
@@ -270,6 +273,20 @@ export function createPicker(opts: {
     return true
   }
 
+  /** How far from the cursor a packet still counts as clicked, in CSS pixels. */
+  const PACKET_GRAB_PX = 22
+  /** The packet under the cursor when the button went DOWN. See onPointerDown. */
+  let downPacket: FlowPick | null = null
+
+  function pickPacket(clientX: number, clientY: number): FlowPick | null {
+    if (!flows) return null
+    if (rectDirty) readRect()
+    const ndcX = ((clientX - rectX) / rectW) * 2 - 1
+    const ndcY = -((clientY - rectY) / rectH) * 2 + 1
+    if (ndcX < -1 || ndcX > 1 || ndcY < -1 || ndcY > 1) return null
+    return flows.pickAt(ndcX, ndcY, camera, rectW / 2, rectH / 2, PACKET_GRAB_PX)
+  }
+
   function pickAt(clientX: number, clientY: number): PickHit | null {
     if (rectDirty) readRect()
     _ndc.set(((clientX - rectX) / rectW) * 2 - 1, -((clientY - rectY) / rectH) * 2 + 1)
@@ -296,6 +313,15 @@ export function createPicker(opts: {
     downT = ev.timeStamp
     downPrimary = ev.button === 0
     dragging = false
+    /* AIM IS TAKEN ON THE PRESS, not on the release.
+     *
+     * Everything else here can be resolved on pointerup because buildings do
+     * not move. A packet does — a Keeper request crosses 180 world units a
+     * second — so by the time the button comes back up it is no longer under
+     * the cursor, and the click selects whatever building it was passing. That
+     * is what this used to do. The press is the moment the user aimed, so the
+     * press is the moment that decides. */
+    downPacket = downPrimary ? pickPacket(ev.clientX, ev.clientY) : null
   }
 
   function onPointerMove(ev: PointerEvent): void {
@@ -322,6 +348,7 @@ export function createPicker(opts: {
     downPrimary = false
     if (dragging || moved || !quick || !wasPrimary) {
       dragging = false
+      downPacket = null
       return
     }
     /* In fly mode the click IS the gesture that captures the mouse, and while
@@ -331,8 +358,23 @@ export function createPicker(opts: {
      * camera. */
     if (document.pointerLockElement !== null) return
 
+    /* A PACKET WINS OVER THE STRUCTURE BEHIND IT.
+     *
+     * Traffic is the thing in motion and the thing in front; a click that lands
+     * on a moving box and selects the building a kilometre behind it is a click
+     * the user has to take back. The tolerance is generous for the same reason
+     * — see `flows.pickAt`. Nothing under the cursor at all still clears both
+     * selections, so clicking empty ground means what it always meant. */
+    const packet = downPacket
+    downPacket = null
+    if (packet) {
+      bus.emit('flow:select', { route: packet.route, kind: packet.kind ?? undefined })
+      return
+    }
+
     const hit = pickAt(ev.clientX, ev.clientY)
     const id = hit?.id ?? null
+    bus.emit('flow:select', { route: null })
     bus.emit('select', { id })
 
     const nowMs = ev.timeStamp
@@ -350,6 +392,7 @@ export function createPicker(opts: {
     if (ev.pointerId === downId) {
       downId = -1
       dragging = false
+      downPacket = null
     }
   }
 

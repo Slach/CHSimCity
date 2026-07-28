@@ -78,6 +78,7 @@ anywhere.
 | Wheel · pinch | Zoom — the dolly follows the cursor, not the pivot |
 | Two-finger scroll | Up and down zooms; sideways pans by the distance a drag would |
 | Click · double-click | Select · fly to |
+| Click a moving packet | What it is, where it came from and where it is going. Its whole duct lights up in the scene, and either end is one click away |
 | `W` `A` `S` `D` / arrows | Move |
 | `F` | Fly mode, on and off. Click the scene to capture the mouse; `Esc` gives it back, `Esc` again leaves |
 | `W` `A` `S` `D` · `Space` `C` · wheel | In fly mode: move · rise and descend · move along your view. `Shift`-wheel changes speed |

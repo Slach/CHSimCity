@@ -126,11 +126,12 @@ async function boot(): Promise<void> {
   add(createKeeper(ctx))
 
   await progress(BOOT_STEPS.roads)
-  scene.add(createRoads(theme))
+  const roads = createRoads(theme)
+  scene.add(roads.group)
   const flows = createFlows(scene, bus, gfx.quality, theme)
   const labels = createLabels(labelsRoot, registry, bus)
   scene.add(labels.group)
-  const picker = createPicker({ dom: renderer.domElement, camera, registry, bus, theme })
+  const picker = createPicker({ dom: renderer.domElement, camera, registry, bus, theme, flows })
   scene.add(picker.group)
 
   await progress(BOOT_STEPS.console)
@@ -168,6 +169,14 @@ async function boot(): Promise<void> {
   ]
 
   /* --- bus wiring --------------------------------------------------------- */
+
+  // Selecting a packet traces its whole duct; selecting a STRUCTURE clears the
+  // trace, because the two are alternative answers to "what am I looking at"
+  // and leaving a lit lane behind a new selection reads as part of it.
+  bus.on('flow:select', ({ route }) => roads.highlight(route))
+  bus.on('select', ({ id }) => {
+    if (id) roads.highlight(null)
+  })
 
   bus.on('focus', ({ id, instant }) => {
     if (!id) {
@@ -299,6 +308,7 @@ async function boot(): Promise<void> {
     for (const m of modules) m.dispose?.()
     for (const u of ui) u.dispose()
     flows.dispose()
+    roads.dispose()
     labels.dispose()
     picker.dispose()
     rig.dispose()

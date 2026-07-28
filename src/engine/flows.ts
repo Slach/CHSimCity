@@ -71,6 +71,8 @@ for (let i = 0; i < KIND_ORDER.length; i++) KIND_INDEX.set(KIND_ORDER[i], i)
  * -------------------------------------------------------------------------*/
 
 interface RouteBake {
+  /** The ROUTES key, so a picked packet can name the duct it is on. */
+  id: string
   /** (SAMPLES+1)*3 world positions */
   pts: Float32Array
   /** unit tangents at each sample */
@@ -104,6 +106,8 @@ const _scl = new THREE.Vector3()
 const _quat = new THREE.Quaternion()
 const _mat = new THREE.Matrix4()
 const _col = new THREE.Color()
+/** Scratch for screen-space picking; see pickAt. */
+const _pick = new THREE.Vector3()
 
 /** Largest i with cum[i] <= d, clamped so i+1 is always a valid sample. */
 function segFor(cum: Float32Array, d: number): number {
@@ -177,10 +181,25 @@ function packetGeometry(): THREE.BufferGeometry {
   return geo
 }
 
+/** What `pickAt` found: the duct, and what kind of packet was on it. */
+export interface FlowPick {
+  route: string
+  kind: FlowKind | null
+}
+
 export interface FlowsApi {
   group: THREE.Object3D
   emit(req: FlowRequest): void
   update(dt: number): void
+  /**
+   * The live packet nearest to a point on screen, within `radiusPx`.
+   *
+   * Deliberately NOT a raycast. A packet is a couple of world units across,
+   * moving, and often a kilometre from the camera — a ray that has to actually
+   * strike it is a test of the pointing hand, not of the intent. Screen-space
+   * proximity picks the thing the user was aiming at.
+   */
+  pickAt(ndcX: number, ndcY: number, camera: THREE.Camera, halfW: number, halfH: number, radiusPx: number): FlowPick | null
   readonly active: number
   readonly dropped: number
   setQuality(q: QualitySettings): void
@@ -278,6 +297,7 @@ export function createFlows(
 
     const idx = bakes.length
     bakes.push({
+      id,
       pts,
       tan,
       bin,
@@ -596,6 +616,51 @@ export function createFlows(
     }
   }
 
+  /* ---- picking ----------------------------------------------------------*/
+
+  /**
+   * Nearest live packet to a screen point.
+   *
+   * Reads the translation straight out of the instance matrix that `update`
+   * just wrote, rather than recomputing the route position: the matrix IS where
+   * the packet was drawn, so the pick can never disagree with the picture, and
+   * the lane offset and the fade are already in it.
+   *
+   * O(live packets) with one vector projection each, and it runs on a click,
+   * not per frame. `_pick` is hoisted like everything else here.
+   */
+  function pickAt(
+    ndcX: number,
+    ndcY: number,
+    camera: THREE.Camera,
+    halfW: number,
+    halfH: number,
+    radiusPx: number,
+  ): FlowPick | null {
+    let best = -1
+    let bestD2 = radiusPx * radiusPx
+    for (let a = 0; a < nAct; a++) {
+      const i = act[a]
+      const o = i * 16
+      // A parked or fading-to-nothing instance is drawn at zero scale. It is
+      // still on screen as a point, and picking one would report a packet the
+      // user cannot see.
+      if (mArr[o] === 0 && mArr[o + 5] === 0 && mArr[o + 10] === 0) continue
+      _pick.set(mArr[o + 12], mArr[o + 13], mArr[o + 14]).project(camera)
+      if (_pick.z > 1) continue // behind the camera, or past the far plane
+      const dx = (_pick.x - ndcX) * halfW
+      const dy = (_pick.y - ndcY) * halfH
+      const d2 = dx * dx + dy * dy
+      if (d2 < bestD2) {
+        bestD2 = d2
+        best = i
+      }
+    }
+    if (best < 0) return null
+    const k = pKind[best]
+    return { route: bakes[pRoute[best]].id, kind: k < KIND_ORDER.length ? KIND_ORDER[k] : null }
+  }
+
   /* ---- quality / teardown -----------------------------------------------*/
 
   function setQuality(q: QualitySettings): void {
@@ -631,6 +696,7 @@ export function createFlows(
     get dropped() {
       return dropped
     },
+    pickAt,
     setQuality,
     dispose,
   }

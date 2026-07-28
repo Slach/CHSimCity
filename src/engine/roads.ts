@@ -34,12 +34,39 @@ const _p = new THREE.Vector3()
 const _t = new THREE.Vector3()
 const _perp = new THREE.Vector3()
 
+/* --- the highlight -------------------------------------------------------
+ * A traced duct is a TUBE, not a line, and the reason is not decoration.
+ * `LineBasicMaterial` cannot be made thicker than one pixel in WebGL, so the
+ * only emphasis a line has left is opacity — and a dark hairline at 0.9 against
+ * the day theme's pale ground reads as one more road among forty, which is
+ * precisely the confusion the highlight exists to end. Real thickness and a
+ * neon material give it a channel the roads do not use at all. */
+const TRACE_SEGMENTS = 128
+/** World units. A part tower is about 3 across, so this reads without walling. */
+const TRACE_RADIUS = 1.15
+const TRACE_RADIAL = 6
+
+export interface RoadsApi {
+  group: THREE.Group
+  /**
+   * Light one route end to end, or clear it with `null`.
+   *
+   * ONE reusable line, refilled in place, rather than brightening the road
+   * already drawn: most routes have no road at all (`visible: false`), and the
+   * reader capillaries and the query fan-out — exactly the ducts a viewer most
+   * needs traced — are among them. A dedicated overlay can trace any route in
+   * ROUTES, drawn or not.
+   */
+  highlight(routeId: string | null): void
+  dispose(): void
+}
+
 /**
  * Draw the road network. One `Line` per visible route, plus one merged
  * `LineSegments` of sleepers per colour+opacity pair — a few dozen draw calls
  * for the whole cluster.
  */
-export function createRoads(theme: ThemeApi): THREE.Group {
+export function createRoads(theme: ThemeApi): RoadsApi {
   const group = new THREE.Group()
   group.name = 'roads'
 
@@ -111,5 +138,53 @@ export function createRoads(theme: ThemeApi): THREE.Group {
     group.add(seg)
   }
 
-  return group
+  /* --- the highlight overlay ---------------------------------------------- */
+
+  /* The MATERIAL is swapped per highlight, never recoloured in place. Both of
+   * the theme's factories are caches keyed by colour, and the theme repaints
+   * their entries on a day/night switch — so setting `.color` on one here would
+   * recolour every other object sharing that entry, and be undone by the next
+   * theme toggle. Asking the cache for the route's own colour costs one
+   * material per distinct route colour and stays theme-managed.
+   *
+   * The colour is the ROUTE's. Colour in this world is semantic and an overlay
+   * does not get to invent one; what the highlight adds is thickness and glow,
+   * which mean nothing on their own. */
+  const trace = new THREE.Mesh(new THREE.BufferGeometry(), theme.neon(theme.color.ink, 1.5))
+  trace.name = 'roads:trace'
+  trace.raycast = () => {}
+  trace.frustumCulled = false
+  trace.userData.chNoShadow = true
+  // Above the roads and the ground, so a traced duct is not half-buried in the
+  // island it runs over.
+  trace.renderOrder = 3
+  trace.visible = false
+  group.add(trace)
+
+  function highlight(routeId: string | null): void {
+    if (routeId === null) {
+      trace.visible = false
+      return
+    }
+    const curve = routeCurve(routeId)
+    const def: RouteDef | undefined = ROUTES[routeId]
+    if (!curve || !def) {
+      trace.visible = false
+      return
+    }
+    // Allocating a geometry per highlight is fine — this runs on a click, not
+    // in the frame loop — but the old one is this module's to release.
+    trace.geometry.dispose()
+    trace.geometry = new THREE.TubeGeometry(curve, TRACE_SEGMENTS, TRACE_RADIUS, TRACE_RADIAL, false)
+    trace.material = theme.neon(def.color, 1.5)
+    trace.visible = true
+  }
+
+  // Only the trace geometry: every material in this module came from the
+  // theme's caches, and the theme disposes those.
+  function dispose(): void {
+    trace.geometry.dispose()
+  }
+
+  return { group, highlight, dispose }
 }

@@ -833,6 +833,11 @@ export interface BusEvents {
   focus: { id: string | null; instant?: boolean }
   select: { id: string | null }
   hover: { id: string | null }
+  /**
+   * A moving packet was clicked, or the selection was cleared. `route` is a key
+   * of ROUTES; the inspector reads its `traffic` and the scene lights the lane.
+   */
+  'flow:select': { route: string | null; kind?: FlowKind }
   knob: { key: keyof Knobs; value: unknown }
   scenario: { id: string | null }
   toast: { text: string; kind?: 'info' | 'warn' | 'good'; ms?: number }
@@ -1056,6 +1061,31 @@ export interface CameraApi {
  * Routes — the road network. Defined in world/layout.ts, drawn by engine/flows.
  * -------------------------------------------------------------------------*/
 
+/** One end of a route: what to call it, and the component to fly to if there
+ *  is one. `id` must be a registered component; `test/layout.test.ts` checks. */
+export interface RouteEnd {
+  label: string
+  id?: string
+}
+
+/**
+ * What travels on a route, and between where and where.
+ *
+ * This is not decoration. The cluster draws several dozen ducts at once and a
+ * packet is a lit box moving along one of them; without this, the honest answer
+ * to "what is that one doing" is that you cannot tell. Every route carries it,
+ * which is why it is required rather than optional — a duct nobody can explain
+ * has no business being drawn.
+ */
+export interface RouteTraffic {
+  /** What one packet on this route IS. Lower case, no trailing stop. */
+  what: string
+  from: RouteEnd
+  to: RouteEnd
+  /** The mechanism, one sentence. Shown under the from → to line. */
+  note: string
+}
+
 export interface RouteDef {
   id: string
   /** Control points, world space. */
@@ -1063,6 +1093,7 @@ export interface RouteDef {
   color: number
   /** Default world units/sec. */
   speed: number
+  traffic: RouteTraffic
   size?: number
   /** Draw a faint static road line for this route. */
   visible?: boolean

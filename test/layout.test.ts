@@ -305,6 +305,36 @@ describe('the route network', () => {
     for (const id of ids) expect(ROUTES[id], `missing route ${id}`).toBeDefined()
   })
 
+  /* --- every duct can say what it is --------------------------------------
+   * A packet is clickable, and what it answers with comes from `traffic`. An
+   * unexplained duct would answer with a blank panel, so the type makes the
+   * field required and these two make it MEAN something: prose that is actually
+   * there, and endpoints that resolve to somewhere a reader can be sent. */
+
+  it('every route says what runs on it and between where', () => {
+    for (const id of Object.keys(ROUTES)) {
+      const t = ROUTES[id].traffic
+      expect(t, `route ${id} has no traffic`).toBeDefined()
+      expect(t.what.length, `route ${id} does not say what travels on it`).toBeGreaterThan(8)
+      expect(t.note.length, `route ${id} has no explanation`).toBeGreaterThan(40)
+      expect(t.from.label.length, `route ${id} has no origin`).toBeGreaterThan(2)
+      expect(t.to.label.length, `route ${id} has no destination`).toBeGreaterThan(2)
+      // Lower case and no full stop: `what` is a phrase used as a panel title,
+      // not a sentence.
+      expect(t.what[0], `route ${id}: "what" should not be capitalised`).toBe(t.what[0].toLowerCase())
+      expect(t.what.endsWith('.'), `route ${id}: "what" should not end in a stop`).toBe(false)
+    }
+  })
+
+  it('every route endpoint with an id points somewhere real', () => {
+    for (const id of Object.keys(ROUTES)) {
+      for (const end of [ROUTES[id].traffic.from, ROUTES[id].traffic.to]) {
+        if (end.id === undefined) continue
+        expect(doc(end.id), `route ${id} sends you to unknown ${end.id}`).toBeDefined()
+      }
+    }
+  })
+
   it('no route has two identical consecutive control points', () => {
     // A repeated point makes CatmullRom produce a zero tangent, and a packet on
     // it flips orientation for one frame.

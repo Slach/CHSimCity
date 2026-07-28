@@ -689,6 +689,53 @@
 .chc-see__btn {
   border: 1px solid var(--line-hair);
 }
+/* --- a packet in transit -------------------------------------------------
+   The two ends stack with the arrow between them rather than sitting side by
+   side: the labels are `ch-s1r2 · parts yard` long, and a row of two of them in
+   a 360px panel wraps into an unreadable pair of blocks with an arrow lost
+   somewhere in the middle. Down the page, the arrow is the direction of
+   travel. */
+.chc-path {
+  display: grid;
+  gap: 2px;
+  margin-top: 6px;
+  justify-items: stretch;
+}
+.chc-end {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 7px 9px;
+}
+.chc-end__k {
+  flex: 0 0 auto;
+  width: 2.6em;
+  color: var(--ink-faint);
+}
+.chc-end__n {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--ink);
+}
+/* An end with nowhere to fly to — the TTL drop is the one that has none. */
+.chc-end--dead {
+  border: 1px dashed var(--line-hair);
+  color: var(--ink-dim);
+}
+.chc-end--dead .chc-end__n {
+  color: var(--ink-dim);
+  font-style: italic;
+}
+.chc-path__arrow {
+  font-size: var(--fs-sm);
+  color: var(--ink-faint);
+  padding-left: 12px;
+  line-height: 1;
+}
+
 .chc-src {
   list-style: none;
   margin: 6px 0 0;

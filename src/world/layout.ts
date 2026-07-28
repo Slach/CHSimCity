@@ -10,7 +10,7 @@ import {
   N_REPLICAS,
   N_SHARDS,
 } from '../core/types'
-import type { RouteDef, TableDef } from '../core/types'
+import type { RouteDef, RouteEnd, RouteTraffic, TableDef } from '../core/types'
 
 /* ============================================================================
  * THE CLUSTER PLAN
@@ -732,14 +732,22 @@ export { INDEX_GRANULARITY }
 
 const R: Record<string, RouteDef> = {}
 
+/**
+ * `traffic` is a required argument and not part of `opts`, so a route cannot be
+ * added without saying what runs on it and between where. Click a packet and
+ * this is what the inspector reads back; a duct with nothing to say here would
+ * be a lit box moving between two unnamed places.
+ */
 function route(
   id: string,
   points: [number, number, number][],
-  opts: Partial<Omit<RouteDef, 'id' | 'points'>> = {},
+  traffic: RouteTraffic,
+  opts: Partial<Omit<RouteDef, 'id' | 'points' | 'traffic'>> = {},
 ): RouteDef {
   R[id] = {
     id,
     points,
+    traffic,
     color: opts.color ?? COLOR.node,
     speed: opts.speed ?? 110,
     size: opts.size ?? 1.1,
@@ -819,6 +827,12 @@ for (let n = 0; n < N_NODES; n++) {
       [door[0] - 10, 5, door[2] - 40],
       [door[0] - 4, 4, door[2] - 10],
     ],
+    {
+      what: 'a statement from the application',
+      from: { label: 'application tier', id: 'clients' },
+      to: { label: `${nodeHost(n)} · Distributed`, id: `node.${n}.dist` },
+      note: `The application picked ${nodeHost(n)} out of the four, so ${nodeHost(n)} is the initiator for this statement. Any of them would have done, and that choice is the only thing the client decides.`,
+    },
     { color: COLOR.client, speed: 125, size: 1.35, visible: true, roadOpacity: 0.15 },
   )
 
@@ -831,6 +845,12 @@ for (let n = 0; n < N_NODES; n++) {
       [40 - n * 17, 6, -392],
       [40 - n * 17, 6, ANCHOR.clientTerminal[2] + 22],
     ],
+    {
+      what: 'the answer to a statement',
+      from: { label: `${nodeHost(n)} · result merge`, id: `node.${n}.resultmerge` },
+      to: { label: 'application tier', id: 'clients' },
+      note: `The initiator combined its own rows with the partial results the other shards sent it, and this is the one answer the client sees. It never learns how many machines were involved.`,
+    },
     { color: COLOR.ok, speed: 150, size: 1.0 },
   )
 }
@@ -886,23 +906,52 @@ for (let from = 0; from < N_NODES; from++) {
     // otherwise six cables would be drawn as twelve lines in six places.
     const drawsRoad = from < to
 
-    route(rid.fanInsert(from, to), bow(0), {
-      color: COLOR.client,
-      speed: 140,
-      size: 1.25,
-      visible: drawsRoad,
-      roadOpacity: drawsRoad ? 0.13 : 0,
-    })
-    route(rid.fanQuery(from, to), bow(1.6), {
-      color: COLOR.reader,
-      speed: 155,
-      size: 1.1,
-    })
-    route(rid.fanResult(from, to), bow(3.2), {
-      color: COLOR.ok,
-      speed: 165,
-      size: 1.0,
-    })
+    /* All three name the same two machines, because they share one connection
+     * pool — the duct is the metal and the colour is the errand. */
+    const a1 = nodeHost(from)
+    const b1 = nodeHost(to)
+    const doorFrom: RouteEnd = { label: `${a1} · Distributed`, id: `node.${from}.dist` }
+    const doorTo: RouteEnd = { label: `${b1} · Distributed`, id: `node.${to}.dist` }
+
+    route(
+      rid.fanInsert(from, to),
+      bow(0),
+      {
+        what: 'a block being forwarded to the shard that owns it',
+        from: doorFrom,
+        to: doorTo,
+        note: `${a1} evaluated the sharding expression over the rows it was given, and these are the ones that hashed to ${b1}'s shard. They were never ${a1}'s to keep.`,
+      },
+      {
+        color: COLOR.client,
+        speed: 140,
+        size: 1.25,
+        visible: drawsRoad,
+        roadOpacity: drawsRoad ? 0.13 : 0,
+      },
+    )
+    route(
+      rid.fanQuery(from, to),
+      bow(1.6),
+      {
+        what: 'a SELECT being fanned out',
+        from: doorFrom,
+        to: doorTo,
+        note: `${a1} is the initiator and cannot answer alone, so it asks one replica of every other shard the same question. This is the question, not the data — it is a few hundred bytes.`,
+      },
+      { color: COLOR.reader, speed: 155, size: 1.1 },
+    )
+    route(
+      rid.fanResult(from, to),
+      bow(3.2),
+      {
+        what: 'a partial result coming home',
+        from: doorFrom,
+        to: doorTo,
+        note: `${a1} read its own parts and is sending ${b1}, the initiator, as little as the query allows — an aggregate state rather than rows, wherever the query can be split that way.`,
+      },
+      { color: COLOR.ok, speed: 165, size: 1.0 },
+    )
   }
 }
 
@@ -919,6 +968,10 @@ for (let n = 0; n < N_NODES; n++) {
   const yard = anchorAt(n, 'partsYard')
   const hot = anchorAt(n, 'hotVolume')
   const cold = anchorAt(n, 'coldVolume')
+  const host = nodeHost(n)
+  const dockEnd: RouteEnd = { label: `${host} · insert dock`, id: `node.${n}.insertdock` }
+  const yardEnd: RouteEnd = { label: `${host} · parts yard`, id: `node.${n}.yard` }
+  const volEnd: RouteEnd = { label: `${host} · storage volumes`, id: `node.${n}.volumes` }
 
   route(
     rid.sortBlock(n),
@@ -927,6 +980,12 @@ for (let n = 0; n < N_NODES; n++) {
       [(dock[0] + sort[0]) / 2, 8, dock[2] - 2],
       [sort[0], 6, sort[2]],
     ],
+    {
+      what: 'a block on its way to be sorted',
+      from: dockEnd,
+      to: { label: `${host} · sort table`, id: `node.${n}.insertdock` },
+      note: 'The rows arrived in whatever order the client sent them. A part is sorted by the ORDER BY key by definition, so this happens before anything is written, in memory, at insert time.',
+    },
     { color: COLOR.partTemporary, speed: 70, size: 1.2 },
   )
 
@@ -937,6 +996,12 @@ for (let n = 0; n < N_NODES; n++) {
       [dock[0], 9, dock[2] + 6],
       [writers[0], 6, writers[2]],
     ],
+    {
+      what: 'a sorted block going to the column writers',
+      from: { label: `${host} · sort table`, id: `node.${n}.insertdock` },
+      to: { label: `${host} · column writers`, id: `node.${n}.insertdock` },
+      note: 'Split by the partition expression first — one part per partition, never one part spanning two — then each column is compressed into its own `.bin` with a `.mrk3` beside it.',
+    },
     { color: COLOR.partPreactive, speed: 80, size: 1.15 },
   )
 
@@ -948,6 +1013,12 @@ for (let n = 0; n < N_NODES; n++) {
       [yard[0] + 8, 8, yard[2] - 26],
       [yard[0], 5, yard[2] - 12],
     ],
+    {
+      what: 'a finished part being committed',
+      from: { label: `${host} · column writers`, id: `node.${n}.insertdock` },
+      to: yardEnd,
+      note: 'The directory was written under a `tmp_insert_` name and is renamed into place here. That rename is the commit: the part becomes visible as a unit, and no query ever sees half of it.',
+    },
     { color: COLOR.partActive, speed: 90, size: 1.3, visible: true, roadOpacity: 0.12 },
   )
 
@@ -958,6 +1029,12 @@ for (let n = 0; n < N_NODES; n++) {
       [hot[0] - 20, -8, hot[2] - 4],
       [hot[0], hot[1] + 5, hot[2]],
     ],
+    {
+      what: 'part bytes landing on the hot volume',
+      from: yardEnd,
+      to: volEnd,
+      note: 'The yard is what `system.parts` knows about; this is where the directory physically is. A new part goes to the first volume of the storage policy, which here is local SSD.',
+    },
     { color: COLOR.hot, speed: 70, size: 1.15 },
   )
 
@@ -968,6 +1045,12 @@ for (let n = 0; n < N_NODES; n++) {
       [cold[0] + 26, (hot[1] + cold[1]) / 2, cold[2] + 6],
       [cold[0], cold[1] + 5, cold[2]],
     ],
+    {
+      what: 'a part being moved down to cold storage',
+      from: volEnd,
+      to: volEnd,
+      note: 'A `TO VOLUME` move under the storage policy, or the hot volume crossing `move_factor`. The part is unchanged — same rows, same name, different disk — and it is a byte-for-byte copy followed by a delete, not a rewrite.',
+    },
     { color: COLOR.cold, speed: 52, size: 1.2 },
   )
 }
@@ -992,6 +1075,8 @@ for (let n = 0; n < N_NODES; n++) {
   const mc = anchorAt(n, 'markCache')
   const yard = anchorAt(n, 'partsYard')
   const pool = anchorAt(n, 'readPool')
+  const host = nodeHost(n)
+  const poolEnd: RouteEnd = { label: `${host} · read pool`, id: `node.${n}.readpool` }
 
   route(
     rid.probeIndex(n),
@@ -1001,6 +1086,12 @@ for (let n = 0; n < N_NODES; n++) {
       [pk[0] + 14, 18, pk[2] - 12],
       [pk[0], 12, pk[2]],
     ],
+    {
+      what: 'a query probing the primary index',
+      from: poolEnd,
+      to: { label: `${host} · primary.cidx`, id: `node.${n}.primaryindex` },
+      note: 'A binary search over one sorting-key row per granule, in RAM. It does not find rows — it finds the MARK RANGES that could contain them, and everything outside those ranges is never opened.',
+    },
     { color: COLOR.primaryIndex, speed: 170, size: 1.0, visible: true, roadOpacity: 0.1 },
   )
 
@@ -1011,6 +1102,12 @@ for (let n = 0; n < N_NODES; n++) {
       [pk[0] - 4, 8, (pk[2] + skip[2]) / 2],
       [skip[0], 7, skip[2]],
     ],
+    {
+      what: 'mark ranges being narrowed by a skip index',
+      from: { label: `${host} · primary.cidx`, id: `node.${n}.primaryindex` },
+      to: { label: `${host} · skip indexes`, id: `node.${n}.skipindexes` },
+      note: 'The primary index chose the ranges; `skp_idx_*.idx2` now throws away granules INSIDE them, using the min/max or the set it holds per granule group. A skip index can only ever remove work, never add rows.',
+    },
     { color: COLOR.skipIndex, speed: 140, size: 0.95 },
   )
 
@@ -1023,6 +1120,12 @@ for (let n = 0; n < N_NODES; n++) {
       [30, 12, -46],
       [disp[0] - 6, 8, disp[2] + 4],
     ],
+    {
+      what: 'a mark lookup, and the offsets coming back',
+      from: { label: `${host} · skip indexes`, id: `node.${n}.skipindexes` },
+      to: poolEnd,
+      note: 'A mark is the `.mrk3` entry that says where a granule starts in the compressed `.bin` and where inside the decompressed block. Resolving it from the mark cache costs nothing; a miss costs a disk read before the read has even begun.',
+    },
     { color: COLOR.markCache, speed: 160, size: 0.9 },
   )
 
@@ -1035,6 +1138,12 @@ for (let n = 0; n < N_NODES; n++) {
         [bay[0] + 6, 6, (disp[2] + bay[2]) / 2],
         [bay[0], 4, bay[2]],
       ],
+      {
+        what: 'a batch of mark ranges handed to one reader thread',
+        from: poolEnd,
+        to: { label: `${host} · reader thread ${th + 1}`, id: `node.${n}.readpool` },
+        note: '`MergeTreeReadPool` hands out work in batches rather than splitting the query up front, so a thread that finishes early comes back for more instead of idling while another finishes a hot range. `max_threads` is how many of these bays exist.',
+      },
       { color: COLOR.reader, speed: 120, size: 0.85 },
     )
   }
@@ -1046,6 +1155,12 @@ for (let n = 0; n < N_NODES; n++) {
       [pool[0] - 24, 7, pool[2] + 10],
       [pool[0], 6, pool[2]],
     ],
+    {
+      what: 'decompressed column data streaming up',
+      from: { label: `${host} · parts yard`, id: `node.${n}.yard` },
+      to: poolEnd,
+      note: 'The bytes actually read. Every one of them was in a granule some earlier step failed to eliminate, which is why a query that names the wrong column can read a hundred times more than one that names the right one.',
+    },
     { color: COLOR.blockCache, speed: 130, size: 1.0 },
   )
 }
@@ -1060,6 +1175,10 @@ for (let n = 0; n < N_NODES; n++) {
   const yard = anchorAt(n, 'partsYard')
   const gantry = anchorAt(n, 'mergeGantry')
   const ttl = anchorAt(n, 'ttlWorks')
+  const host = nodeHost(n)
+  const yardEnd: RouteEnd = { label: `${host} · parts yard`, id: `node.${n}.yard` }
+  const gantryEnd: RouteEnd = { label: `${host} · system.merges`, id: `node.${n}.merges` }
+  const ttlEnd: RouteEnd = { label: `${host} · TTL works`, id: `node.${n}.ttl` }
 
   route(
     rid.yardToMerge(n),
@@ -1068,6 +1187,12 @@ for (let n = 0; n < N_NODES; n++) {
       [gantry[0] - 14, 12, gantry[2] - 12],
       [gantry[0], 14, gantry[2]],
     ],
+    {
+      what: 'a part entering a merge',
+      from: yardEnd,
+      to: gantryEnd,
+      note: 'Several parts of ONE partition of ONE table, selected together and reserved. A merge never crosses a partition boundary, which is why a partition key with too many values leaves a cluster unable to merge its way out of trouble.',
+    },
     { color: COLOR.merge, speed: 80, size: 1.3, visible: true, roadOpacity: 0.16 },
   )
 
@@ -1078,6 +1203,12 @@ for (let n = 0; n < N_NODES; n++) {
       [yard[0] + 24, 11, yard[2] + 20],
       [yard[0] + 30, 5, yard[2] + 6],
     ],
+    {
+      what: 'the merged part going back to the yard',
+      from: gantryEnd,
+      to: yardEnd,
+      note: 'One new part in place of its inputs, written out in sorted order in a single pass. The inputs do not disappear: they turn OUTDATED and stay on disk until no running query is still reading them.',
+    },
     { color: COLOR.partActive, speed: 90, size: 1.4 },
   )
 
@@ -1088,6 +1219,12 @@ for (let n = 0; n < N_NODES; n++) {
       [(yard[0] + ttl[0]) / 2 + 14, 9, ttl[2] - 6],
       [ttl[0], 7, ttl[2]],
     ],
+    {
+      what: 'a part with expired rows going to the TTL works',
+      from: yardEnd,
+      to: ttlEnd,
+      note: 'A TTL merge takes exactly ONE input part and rewrites it without the expired rows. It is a merge in every respect except that it does not consolidate anything, and `merge_with_ttl_timeout` is how often a part is even considered for it.',
+    },
     { color: COLOR.ttl, speed: 85, size: 1.2, visible: true, roadOpacity: 0.14 },
   )
 
@@ -1098,6 +1235,12 @@ for (let n = 0; n < N_NODES; n++) {
       [ttl[0] + 12, 3, ttl[2] + 26],
       [ttl[0] + 18, 0.6, ttl[2] + 38],
     ],
+    {
+      what: 'expired rows being dropped',
+      from: ttlEnd,
+      to: { label: 'nowhere — they are gone', },
+      note: 'The rewritten part does not contain them and the old part is superseded. This is the only traffic in the cluster with no destination, because deleting rows in a MergeTree means writing a part that lacks them.',
+    },
     { color: COLOR.partExpired, speed: 70, size: 1.1 },
   )
 }
@@ -1129,6 +1272,12 @@ for (let n = 0; n < N_NODES; n++) {
       [ANCHOR.keeper[0] + 90 * lane, 5, 272],
       [ANCHOR.keeper[0] + 30 * lane, 6, ANCHOR.keeper[2] - 20],
     ],
+    {
+      what: 'a metadata write to Keeper',
+      from: { label: `${nodeHost(n)} · replication queue`, id: `node.${n}.queue` },
+      to: { label: 'Keeper quorum', id: 'keeper.ensemble' },
+      note: 'A few hundred bytes saying a part exists — never the part. Nothing on this wire is user data, and yet no block is written anywhere in the cluster without it: lose the session and the replica goes read-only.',
+    },
     { color: COLOR.keeper, speed: 180, size: 0.9, visible: true, roadOpacity: 0.13 },
   )
 
@@ -1140,6 +1289,12 @@ for (let n = 0; n < N_NODES; n++) {
       [q[0] - 26 * lane * -1, 6, q[2] + 56],
       [q[0] + 4, 8, q[2] + 6],
     ],
+    {
+      what: 'a log entry arriving from Keeper',
+      from: { label: 'Keeper quorum', id: 'keeper.ensemble' },
+      to: { label: `${nodeHost(n)} · replication queue`, id: `node.${n}.queue` },
+      note: 'The other replica wrote a part and said so; this replica now has an entry in `system.replication_queue` telling it to go and get it. This wire carries the INSTRUCTION. The part itself comes over the coral wire, directly from the other replica.',
+    },
     { color: COLOR.replication, speed: 180, size: 0.95 },
   )
 }
@@ -1171,6 +1326,12 @@ for (let s = 0; s < N_SHARDS; s++) {
           [flankX, 7, ty[2] - 22],
           [ty[0] + flank * 10, 6, ty[2] - 8],
         ],
+        {
+          what: 'a whole part directory over HTTP',
+          from: { label: `${nodeHost(from)} · parts yard`, id: `node.${from}.yard` },
+          to: { label: `${nodeHost(to)} · insert dock`, id: `node.${to}.insertdock` },
+          note: `The biggest thing that moves in this cluster, and it goes replica to replica — never through Keeper, which only said the part existed. Both machines are in shard ${s + 1} and hold the same rows; that is what a replica is.`,
+        },
         { color: COLOR.fetch, speed: 100, size: 1.35, visible: true, roadOpacity: 0.15 },
       )
     }
@@ -1190,6 +1351,12 @@ for (let i = 0; i < N_KEEPERS; i++) {
       [(l[0] + f[0]) / 2, 11, (l[2] + f[2]) / 2],
       [f[0], 9, f[2] - 4],
     ],
+    {
+      what: 'a raft log entry, and the vote back',
+      from: { label: 'Keeper leader', id: 'keeper.1' },
+      to: { label: `Keeper follower ${i + 1}`, id: `keeper.${i}` },
+      note: 'Agreement, not data. The leader is not allowed to consider an entry committed until a majority has it, and a majority of three is two — which is the whole reason the ensemble is an odd number.',
+    },
     { color: COLOR.keeper, speed: 200, size: 0.8, visible: true, roadOpacity: 0.14 },
   )
 }

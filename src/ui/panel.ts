@@ -1,4 +1,16 @@
-import type { ComponentDef, ComponentDoc, ComponentKind, DocRef, DocReferences, Knobs, SimState } from '../core/types'
+import type {
+  ComponentDef,
+  ComponentDoc,
+  ComponentKind,
+  DocRef,
+  DocReferences,
+  FlowKind,
+  Knobs,
+  RouteDef,
+  RouteEnd,
+  SimState,
+} from '../core/types'
+import { ROUTES } from '../world/layout'
 import { doc, knobMeta, mdToHtml } from './content'
 import { createCollapse, createKnobControl, loadFlag, saveFlag } from './controls'
 import type { KnobControl } from './controls'
@@ -199,6 +211,8 @@ export function createInspector(ctx: UiContext): UiModule {
   let liveDot: HTMLElement | null = null
   /** undefined until the first render, so the empty state is drawn on boot */
   let currentId: string | null | undefined
+  /** The route whose packet is on show, if the panel is showing one. */
+  let currentFlow: string | null = null
   let currentDef: ComponentDef | undefined
   /** seconds since the last metric refresh; primed so the first frame paints */
   let acc = TICK
@@ -412,9 +426,103 @@ export function createInspector(ctx: UiContext): UiModule {
     return target
   }
 
+  /* --- a packet, rather than a structure ----------------------------------
+   * The cluster draws several dozen ducts at once and the traffic on them is
+   * the only thing that glows, so "what is that box and where is it going" is
+   * the question the scene provokes most often and could not answer at all.
+   * Clicking one lands here: the two ends by name, the mechanism, and a way to
+   * go and look at either end. The lane itself lights up in the scene, which is
+   * the half of the answer prose cannot give.
+   * ----------------------------------------------------------------------- */
+
+  function endButton(end: RouteEnd, role: 'from' | 'to'): HTMLElement {
+    const target = end.id && ctx.registry.get(end.id) ? end.id : null
+    const node = el(
+      target ? 'button' : 'span',
+      {
+        class: target ? 'ch-btn chc-end' : 'chc-end chc-end--dead',
+        ...(target ? { type: 'button', title: `Fly to ${end.label}` } : {}),
+        ...(target
+          ? {
+              on: {
+                click: () => {
+                  ctx.bus.emit('focus', { id: target })
+                  ctx.bus.emit('select', { id: target })
+                },
+              },
+            }
+          : {}),
+      },
+      el('span', { class: 'ch-eyebrow chc-end__k', text: role === 'from' ? 'from' : 'to' }),
+      el('span', { class: 'chc-end__n', text: end.label }),
+    )
+    return node
+  }
+
+  function renderFlow(def: RouteDef, kind: FlowKind | undefined): HTMLElement {
+    const wrap = el('div', { class: 'chc-content ch-enter' })
+    const t = def.traffic
+
+    const path = el('div', { class: 'chc-path' })
+    path.append(endButton(t.from, 'from'), el('span', { class: 'chc-path__arrow', text: '↓' }), endButton(t.to, 'to'))
+    wrap.append(el('div', { class: 'chc-block' }, el('span', { class: 'ch-eyebrow', text: 'This packet' }), path))
+
+    wrap.append(el('div', { class: 'chc-block' }, proseBody(t.note)))
+
+    /* The duct's own identity, last and quiet. It is what to grep for in the
+     * plan, not something a reader needs in order to understand the picture. */
+    const meta = el('div', { class: 'chc-block' })
+    meta.append(el('span', { class: 'ch-eyebrow', text: 'This duct' }))
+    const rows = el('ul', { class: 'chc-src' })
+    rows.append(el('li', { class: 'chc-src__i ch-mono', text: def.id }))
+    if (kind) rows.append(el('li', { class: 'chc-src__i ch-mono', text: `kind: ${kind}` }))
+    meta.append(rows)
+    wrap.append(meta)
+
+    return wrap
+  }
+
+  function selectFlow(routeId: string | null, kind: FlowKind | undefined): void {
+    if (routeId === null) {
+      // Only a flow selection can clear a flow selection. A structure click
+      // clears it by going through `select`, which owns the panel outright.
+      if (currentFlow !== null) {
+        currentFlow = null
+        select(null)
+      }
+      return
+    }
+    const def: RouteDef | undefined = ROUTES[routeId]
+    if (!def) return
+
+    currentFlow = routeId
+    currentId = undefined // so a later click on a structure always re-renders
+    currentDef = undefined
+    teardown()
+
+    kindBadge.hidden = false
+    kindBadge.dataset.kind = 'network'
+    setText(kindBadge, 'in transit')
+    kindBadge.style.setProperty('--kind', hex6(def.color))
+
+    setText(title, def.traffic.what)
+    setText(subtitle, `${def.traffic.from.label} → ${def.traffic.to.label}`)
+    subtitle.hidden = false
+    readout.hidden = true
+    // The packet is moving and there is nothing at a fixed point to frame. The
+    // two ends are buttons instead, and each of them does have a place.
+    flyBtn.disabled = true
+    flyBtn.title = 'A packet is in transit — fly to one of its two ends instead'
+
+    body.append(renderFlow(def, kind))
+    body.scrollTop = 0
+    setOpen(true)
+  }
+
   /* --- selection --------------------------------------------------------- */
 
   function select(id: string | null): void {
+    if (id !== null) currentFlow = null
     if (id === currentId) {
       if (id && !open) setOpen(true)
       return
@@ -465,6 +573,7 @@ export function createInspector(ctx: UiContext): UiModule {
   /* --- wiring ------------------------------------------------------------ */
 
   const offSelect = ctx.bus.on('select', ({ id }) => select(id))
+  const offFlow = ctx.bus.on('flow:select', ({ route, kind }) => selectFlow(route, kind))
 
   const onNarrow = (): void => {
     compact = narrow.matches
@@ -502,6 +611,7 @@ export function createInspector(ctx: UiContext): UiModule {
     },
     dispose() {
       offSelect()
+      offFlow()
       narrow.removeEventListener('change', onNarrow)
       teardown()
       host.remove()
