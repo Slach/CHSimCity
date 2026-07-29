@@ -535,7 +535,7 @@ export function createFlows(
     // which the model derives from the row count of the actual batch. Clamped
     // because a pod wider than the road it is on stops reading as freight and
     // starts reading as a wall.
-    const size = Math.min(3.2, Math.max(0.3, req.size ?? b.size))
+    const size = Math.min(3.6, Math.max(0.3, req.size ?? b.size))
     const spread = req.spread ?? 1.0
     const kind = req.kind !== undefined ? (KIND_INDEX.get(req.kind) ?? KIND_DEFAULT) : KIND_DEFAULT
     const stagger = req.stagger ?? 0

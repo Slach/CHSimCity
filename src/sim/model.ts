@@ -541,15 +541,23 @@ export function createSim(bus: Bus): SimApi {
    * chosen: a packet's volume is the batch it is carrying, and nothing else.
    *
    * Logarithmic for the same reason `partHeight` is: the model moves batches
-   * from a thousand rows (one tiny INSERT) to tens of millions (a level-5 merge
-   * output), and a linear scale makes everything below the top of that range a
-   * single pixel. Calibrated so 1k rows ≈ 0.45 and 10M rows ≈ 2.6 — a factor of
-   * six in apparent volume across four orders of magnitude of data, which is
-   * about as much as the eye reads reliably at cluster distance.
+   * from a hundred rows to tens of millions, and a linear scale makes everything
+   * below the top of that range a single pixel.
+   *
+   * CALIBRATED AGAINST THE KNOB, not against the data range, and that is the
+   * whole trick. `insertBlockRows` spans 100 to 2,000,000 — over four decades —
+   * and the default sits at 100,000. A gentle slope put the default two thirds
+   * of the way up the curve, so RAISING the knob, which is the lesson people
+   * come to this control for, changed almost nothing on screen. The slope is
+   * therefore steep enough that each decade is clearly a different pod, and the
+   * bottom simply floors: below a few thousand rows the lesson is carried by how
+   * MANY pods there are and by the yard filling up, not by any one of them.
+   *
+   *   1k → 0.55 (floor)   10k → 1.31   100k → 2.26   1M → 3.17   2M → 3.5
    */
   function flowSize(rows: number): number {
-    if (!(rows > 0)) return 0.45
-    return clamp(0.45 + (Math.log10(rows) - 3) * 0.54, 0.4, 2.6)
+    if (!(rows > 0)) return 0.55
+    return clamp(0.55 + (Math.log10(rows) - 3.2) * 0.95, 0.55, 3.6)
   }
 
   function flow(route: string, count: number, kind: FlowKind, size?: number, stagger?: number): void {
@@ -1304,10 +1312,17 @@ export function createSim(bus: Bus): SimApi {
     noteClientStatement(init)
     state.clients.lastSelectTarget = init
     d.queriesInitiated++
-    // A SELECT leaving the client is a STATEMENT, not data: a few hundred bytes
-    // of SQL however much it is about to read. The pods that come back are the
-    // ones that carry volume.
-    flow(rid.clientToNode(init), 1, 'query', 0.6)
+    /* A SELECT leaving the client is a STATEMENT, not data: a few hundred bytes
+     * of SQL however much it is about to read, so its size is a CONSTANT and not
+     * a `flowSize` — being unmoved by the row counts is the point.
+     *
+     * But not an arbitrarily small constant. The client routes are the longest
+     * in the model — five hundred units, seen from an establishing shot a
+     * thousand units back — and at 0.6 the statement and its answer were both
+     * under a pixel there, so "the application asks and is answered" had
+     * silently stopped being drawn at all. Honesty about volume does not get to
+     * cost a mechanism its visibility. */
+    flow(rid.clientToNode(init), 1, 'query', 1.05)
     let fanned = 0
     for (let s = 0; s < N_SHARDS; s++) {
       const primary = pickReplica(s, false)
@@ -1478,7 +1493,8 @@ export function createSim(bus: Bus): SimApi {
     nt.heat = Math.min(1, nt.heat + 0.25)
     // Only a remote shard costs a network hop. The initiator's own share of the
     // reading never leaves the machine.
-    if (node !== initiator) flow(rid.fanQuery(initiator, node), 1, 'query', 0.65)
+    // Also a statement and not data — the initiator forwards the SQL, not rows.
+    if (node !== initiator) flow(rid.fanQuery(initiator, node), 1, 'query', 0.95)
 
     /* --- hand the mark ranges to the pool ------------------------------- */
     assignReaders(node, q)
@@ -1599,9 +1615,11 @@ export function createSim(bus: Bus): SimApi {
         d.rowsMerged += q.rowsRead
         d.activity = Math.min(1, d.activity + 0.2)
         // The answer to an aggregate is a handful of rows however many were
-        // scanned to produce it. That asymmetry — a huge read, a tiny answer —
-        // is the shape of every analytical query and is worth drawing.
-        flow(rid.nodeToClient(q.initiator), 1, 'result', 0.7)
+        // scanned to produce it. A constant, therefore — the asymmetry between a
+        // huge read and a tiny answer is the shape of every analytical query —
+        // but a constant big enough to see on the longest route in the model.
+        // See the note on the outbound statement above.
+        flow(rid.nodeToClient(q.initiator), 1, 'result', 1.15)
         queryMsAcc += q.duration * 1000
         queryMsCount++
         n.queries.splice(i, 1)
