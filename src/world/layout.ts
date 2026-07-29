@@ -3,9 +3,9 @@ import { COLOR } from '../core/theme'
 import {
   INDEX_GRANULARITY,
   N_KEEPERS,
+  N_LEVEL_LANES,
   N_MERGE_SLOTS,
   N_NODES,
-  N_PART_SLOTS,
   N_READ_THREADS,
   N_REPLICAS,
   N_SHARDS,
@@ -63,23 +63,39 @@ export const CITY = {
   /** One node island's footprint. Nothing may be placed outside it. */
   node: { w: 250, d: 210, deckTop: 2.6, deckThickness: 2.2 },
   /**
-   * The parts yard: one BAND per table, because `system.parts` is per table and
-   * a merge can never cross a table any more than it can cross a partition.
-   * Each band is `cols x rows` slots wide, which is the whole of N_PART_SLOTS.
+   * The parts yard, which is `system.parts` drawn as a place. Three axes, and
+   * every one of them is a column of that table:
+   *
+   *   BAND (z, coarse)   the TABLE. A merge can never cross a table.
+   *   GROUP (x)          the PARTITION. A merge can never cross one of those
+   *                      either, which is the whole of what PARTITION BY buys
+   *                      you and is invisible unless the partitions stand apart.
+   *   LANE (z, fine)     the merge LEVEL, 0 at the front. A merge takes several
+   *                      parts out of one lane and puts ONE part into the lane
+   *                      behind it, so background merging is a visible march
+   *                      away from the viewer: many thin towers at the front,
+   *                      few wide ones at the back.
+   *
+   * A cell — one (table, partition, level) — holds `cols` parts at full pitch
+   * and then SQUEEZES rather than overflowing. That squeeze is deliberate: a
+   * level-0 cell packed with sixty slivers is what "too many parts" looks like.
    */
   yard: {
-    cols: 32,
-    rows: 3,
-    pitchX: 3.0,
-    pitchZ: 3.2,
+    /** Parts per cell at full pitch. Beyond this the cell squeezes. */
+    cols: 8,
+    pitchX: 2.6,
+    /** Distance between merge-level lanes within a band. */
+    pitchZ: 3.0,
+    /** Gap between one partition's group of lanes and the next. */
+    partitionGap: 6.5,
     /** Distance between one table's band and the next. */
-    bandPitch: 15,
+    bandPitch: 19,
     baseY: 2.6,
     /** Tallest a part tower ever gets, at the largest row count in the model. */
     maxRise: 15,
     /** The deck the bands stand on. */
-    deckW: 106,
-    deckD: 52,
+    deckW: 120,
+    deckD: 58,
   },
   /** The cache deck above the yard's north side. */
   cacheDeck: { w: 96, d: 20, y: 9 },
@@ -266,21 +282,84 @@ export function keeperPos(i: number): [number, number, number] {
   return [ANCHOR.keeper[0] + x, 0, ANCHOR.keeper[2] + (i === 1 ? -22 : 8)]
 }
 
-/**
- * Node-local position of part slot `i` of table `table` in the yard.
+/* --------------------------------------------------------------------------
+ * The yard's addressing: (table, partition, level, position in that cell).
  *
- * Slots run west to east along a band, then wrap to the next row of the same
- * band — so a partition's parts, whose slots are handed out in order, read as a
- * run rather than as scattered towers.
+ * A part's place in the yard is derived from what the part IS, not from the
+ * order it happened to be created in. That is the point: two parts stand next
+ * to each other because they are in the same partition at the same merge level
+ * and could therefore be merged together, and a part stands one lane back
+ * because it has been merged one more time.
+ * ------------------------------------------------------------------------*/
+
+/** Width of one (partition, level) cell at full pitch. */
+export function yardCellWidth(): number {
+  return CITY.yard.cols * CITY.yard.pitchX
+}
+
+/** Half-width of one table's whole row of partition groups. */
+export function yardTableHalfWidth(table: number): number {
+  const n = Math.max(1, TABLES[table].partitions)
+  return (n * yardCellWidth() + (n - 1) * CITY.yard.partitionGap) / 2
+}
+
+/** The widest table's half-width — what the deck and the nameplates clear. */
+export function yardHalfWidth(): number {
+  let w = 0
+  for (let t = 0; t < N_TABLES; t++) w = Math.max(w, yardTableHalfWidth(t))
+  return w
+}
+
+/** Node-local x of the centre line of one partition's group of lanes. */
+export function partitionGroupX(table: number, partition: number): number {
+  const n = Math.max(1, TABLES[table].partitions)
+  const step = yardCellWidth() + CITY.yard.partitionGap
+  return (partition - (n - 1) / 2) * step
+}
+
+/**
+ * The lane a part of this level stands in. The last lane is "this deep or
+ * deeper", so the yard's depth does not grow with the cluster's age — a
+ * long-running table reaches level 9 and the yard still has five lanes.
  */
-export function partSlotLocal(table: number, i: number): [number, number, number] {
-  const { cols, rows, pitchX, pitchZ, bandPitch, baseY } = CITY.yard
-  const col = i % cols
-  const row = Math.floor(i / cols) % rows
-  const halfX = ((cols - 1) * pitchX) / 2
-  const halfZ = ((rows - 1) * pitchZ) / 2
+export function partLevelLane(level: number): number {
+  return level < 0 ? 0 : level < N_LEVEL_LANES ? level : N_LEVEL_LANES - 1
+}
+
+/** Node-local z of merge-level lane `lane` in table `table`'s band. */
+export function partLaneZ(table: number, lane: number): number {
+  const { pitchZ, bandPitch } = CITY.yard
   const bandZ = (table - (N_TABLES - 1) / 2) * bandPitch
-  return [-halfX + col * pitchX, baseY, bandZ - halfZ + row * pitchZ]
+  return bandZ - ((N_LEVEL_LANES - 1) * pitchZ) / 2 + lane * pitchZ
+}
+
+/**
+ * The spacing a cell holding `count` parts uses. Full pitch up to `cols`, and
+ * then the cell squeezes so everything still fits inside its own partition
+ * group — a part must never wander into the neighbouring partition, because
+ * standing in a partition is a factual claim about what it can be merged with.
+ */
+export function partCellPitch(count: number): number {
+  const { cols, pitchX } = CITY.yard
+  return count <= cols ? pitchX : yardCellWidth() / count
+}
+
+/**
+ * Node-local position of the `index`-th of `count` parts in one cell.
+ *
+ * `index` is the part's rank within its cell in block order, so a partition's
+ * parts read left to right in the order their rows arrived.
+ */
+export function partPlaceLocal(
+  table: number,
+  partition: number,
+  lane: number,
+  index: number,
+  count: number,
+): [number, number, number] {
+  const pitch = partCellPitch(count)
+  const x = partitionGroupX(table, partition) + (index - (count - 1) / 2) * pitch
+  return [x, CITY.yard.baseY, partLaneZ(table, lane)]
 }
 
 /** Node-local z of table `table`'s band centre line. */

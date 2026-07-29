@@ -14,8 +14,9 @@ coloured by its state; the orange slab behind it is the mark cache, and
 
 Four servers, three Keeper nodes, and a `Distributed` table on every one of
 them. Every structure is one real mechanism: the towers in the middle of each
-island are `system.parts`, and a part's **height is its row count** and its
-**colour is its `system.parts.state`**. The yellow tower to the west is
+island are `system.parts`, and a part's **height is its row count**, its
+**colour is its `system.parts.state`**, and where it stands is its partition and
+its merge level. The yellow tower to the west is
 `primary.cidx`. The gantry to the south is `system.merges`, and the beam it drops
 onto the yard is the set of parts that merge has reserved.
 
@@ -121,7 +122,7 @@ Inside one island, west to east:
 | **primary.cidx** (west) | The sparse primary index — one sorting-key row per 8192-row granule. Drawn as equal steps, because that is what it is |
 | **Skip index sheds** | `skp_idx_*.idx2`. Each shed's **height is the share of blocks that index can actually prune** |
 | **Cache deck** (elevated) | The mark cache and the uncompressed cache, as two tanks |
-| **Parts yard** (centre) | `system.parts`, standing over the excavation the data lives in. One band per table |
+| **Parts yard** (centre) | `system.parts`, standing over the excavation the data lives in. One band per **table**, one group per **partition**, one lane per merge **level** |
 | **Read pool** (east) | `MergeTreeReadPool` and its reader threads. Each bay's colour is its phase |
 | **Merge gantry** (south) | `system.merges`, with a beam onto every input part |
 | **TTL works** | Where expired rows are removed — or moved |
@@ -141,6 +142,19 @@ renamed into place, committing · **violet** `temporary` — still `tmp_insert_�
 Elsewhere: **amber** merges, **magenta** mutations, **pink** TTL, **orange**
 replication, **coral** a part crossing the wire between replicas, **violet**
 Keeper, **yellow** the primary index, **aqua** the skip indexes.
+
+There is a second axis, and it is the only code that applies to both a moving
+packet and a standing part: **red is being written, green is being read.** Every
+packet on the write path is red and every packet on the read path is green, and a
+packet's **bulk is its batch** — one 100k-row INSERT is one big pod, a hundred
+1k-row INSERTs are a hundred small ones. A part in the yard **pulses** the same
+two colours: red while it is being created, green while a query or a merge is
+reading it. It is a pulse rather than a colour because a part's colour is already
+spoken for — at rest, colour is state and nothing else.
+
+That is what makes a background merge legible: several parts blink green in lane
+`x-1` because they are being read, and one wider part blinks red in lane `x`
+because it is being written.
 
 ---
 

@@ -132,6 +132,47 @@ describe('the write path', () => {
     expect(seen).toBeGreaterThan(0)
   })
 
+  /**
+   * Read heat and write heat are two channels, not one, because the yard paints
+   * them two colours. A `temporary` part is `tmp_insert_…`: it is not in the data
+   * part set and no SELECT can open it, so it being read-hot would be impossible
+   * rather than merely wrong.
+   */
+  it('a part being written is write-hot, and a temporary part is never read-hot', () => {
+    const sim = makeSim({ insertsPerSec: 20, insertBlockRows: 20000 })
+    let seen = 0
+    observe(sim, 20, () => {
+      for (const nd of sim.state.nodes) {
+        for (const t of nd.tables) {
+          for (const p of t.parts) {
+            if (p.state !== 'temporary') continue
+            seen++
+            expect(p.writeHeat).toBeGreaterThan(0.3)
+            expect(p.heat).toBe(0)
+          }
+        }
+      }
+    })
+    expect(seen).toBeGreaterThan(0)
+  })
+
+  it('write heat decays, so the pulse is an event and not a badge', () => {
+    const sim = makeSim({ insertsPerSec: 20, insertBlockRows: 20000 })
+    run(sim, 30)
+    let seen = 0
+    for (const nd of sim.state.nodes) {
+      for (const t of nd.tables) {
+        for (const p of t.parts) {
+          // Ten simulated seconds is long past "just written" by any reading.
+          if (sim.state.t - p.createdAt < 10) continue
+          seen++
+          expect(p.writeHeat).toBeLessThan(0.05)
+        }
+      }
+    }
+    expect(seen).toBeGreaterThan(0)
+  })
+
   it('marks_count is ceil(rows / index_granularity) + 1', () => {
     const sim = makeSim()
     for (const p of sim.state.nodes[0].tables[0].parts) {
@@ -267,6 +308,31 @@ describe('merges', () => {
           checked++
           const level = Number(m.resultPart.split('_')[3])
           expect(level).toBeGreaterThan(maxInput)
+        }
+      }
+    })
+    expect(checked).toBeGreaterThan(0)
+  })
+
+  /**
+   * The yard's red/green pulse is only honest if these hold. A merge reads every
+   * row of every input part it holds, so an input must be read-hot for as long
+   * as the merge runs — that is what makes "several parts are being consumed to
+   * make one" visible in the yard rather than only on the gantry.
+   */
+  it('a merge keeps every input part it holds read-hot', () => {
+    const sim = makeSim({ insertsPerSec: 25, insertBlockRows: 40000, mergePoolSize: 4 })
+    let checked = 0
+    observe(sim, 60, () => {
+      for (const nd of sim.state.nodes) {
+        for (const m of nd.merges) {
+          if (!m.active) continue
+          for (const name of m.sourceParts) {
+            const p = nd.tables[m.table].parts.find((x) => x.name === name)
+            if (!p || !p.reserved) continue
+            checked++
+            expect(p.heat).toBeGreaterThan(0.5)
+          }
         }
       }
     })

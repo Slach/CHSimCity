@@ -10,6 +10,8 @@ import type {
   RouteEnd,
   SimState,
 } from '../core/types'
+import { flowAxisColorKey } from '../core/types'
+import { COLOR } from '../core/theme'
 import { ROUTES } from '../world/layout'
 import { doc, knobMeta, mdToHtml } from './content'
 import { createCollapse, createKnobControl, loadFlag, saveFlag } from './controls'
@@ -502,8 +504,12 @@ export function createInspector(ctx: UiContext): UiModule {
 
     kindBadge.hidden = false
     kindBadge.dataset.kind = 'network'
-    setText(kindBadge, 'in transit')
-    kindBadge.style.setProperty('--kind', hex6(def.color))
+    // The badge says which side of the read/write axis the packet was on, and is
+    // painted the colour the packet itself was. Reading `def.color` here showed
+    // the DUCT's colour, which is not what the reader just clicked on.
+    const axisKey = flowAxisColorKey(kind)
+    setText(kindBadge, axisKey === 'flowWrite' ? 'writing' : axisKey === 'flowRead' ? 'reading' : 'in transit')
+    kindBadge.style.setProperty('--kind', hex6(axisKey ? COLOR[axisKey] : def.color))
 
     setText(title, def.traffic.what)
     setText(subtitle, `${def.traffic.from.label} → ${def.traffic.to.label}`)

@@ -487,7 +487,7 @@ Only past \`parts_to_throw_insert\` (300) does it give up with \`Code: 252. Too 
   {
     id: 'node.yard',
     title: 'system.parts',
-    subtitle: 'one tower per part — height is rows, colour is state',
+    subtitle: 'one tower per part — partition across, merge level back, rows up',
     tldr: 'A part is a directory. Everything about MergeTree follows from that.',
     sections: [
       {
@@ -508,7 +508,19 @@ Everything else follows from that one fact:
 
 A part with \`min_block == max_block\` and level 0 came straight out of one INSERT and nothing has touched it. A trailing fifth number is a **mutation version**: \`20260701_412_418_2_43\` is the same rows as \`20260701_412_418_2\`, rewritten by mutation 43.
 
-In the yard, the lit cap on top of a tower is its level. It is the one property of a part you cannot read from its height.`,
+Every field of that name is a coordinate in the yard, which is why the yard is laid out the way it is. The lit cap on top of a tower is the only field that is not: it is the mutation version, which has nowhere else to go.`,
+      },
+      {
+        heading: 'How to read the yard',
+        body: `**One band per table**, named on the west kerb. A merge can never cross a table.
+
+**One group per partition**, named with its real \`partition_id\` along the north edge. A merge can never cross that boundary either — that is the whole of what \`PARTITION BY\` buys you, and the gaps between the groups are it.
+
+**One lane per merge level**, numbered on the east, level 0 at the front. A background merge takes several parts out of one lane and puts **one** part into the lane behind it, so merging is a visible march away from you: many thin towers at the front, a few wide ones at the back. Footprint is the level as well as the lane, and height is still rows — a deeper part really does hold more rows, and watching the two agree is what makes the level believable.
+
+A cell — one table, one partition, one level — holds eight towers at full spacing and then **squeezes**. A level-0 cell packed with sixty slivers is what "too many parts" looks like before the exception arrives.
+
+On top of all of that, a tower **pulses**: red while it is being written, green while it is being read — by a SELECT, or by the merge that is consuming it. That is the same red/green the moving packets use. It is a pulse and not a colour precisely because a part's colour is already spoken for: at rest, colour is state and nothing else.`,
       },
       {
         heading: 'The five states',
@@ -531,6 +543,8 @@ So a high part count is simultaneously a query-latency problem, a mark-cache-pre
       {
         heading: 'What the model simplifies',
         body: `A real node holds thousands of parts per table. The yard is a WINDOW onto the newest 96 per table: a part beyond it is fully simulated — it merges, it expires, it is fetched, it counts in every total — it simply has nowhere to stand, so it is not drawn. When the window is full the oldest \`outdated\` directory gives up its place first, which costs no information because \`old_parts_lifetime\` is a maximum rather than a minimum.
+
+There are five level lanes and the last one is labelled \`4+\`: a part at level 7 stands in it alongside the level-4 parts. Real levels have no ceiling, and a yard that grew a lane every time a table matured would eventually be deeper than the island.
 
 Compact versus Wide part format is described but not drawn. \`min_rows_for_wide_part\`, \`checksums.txt\` and the projection directories are not modelled.`,
       },

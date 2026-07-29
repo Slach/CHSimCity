@@ -536,6 +536,22 @@ export function createSim(bus: Bus): SimApi {
   let quiet = false
   let applying = false
 
+  /**
+   * Packet bulk from a row count. This is the ONLY way a `size` should be
+   * chosen: a packet's volume is the batch it is carrying, and nothing else.
+   *
+   * Logarithmic for the same reason `partHeight` is: the model moves batches
+   * from a thousand rows (one tiny INSERT) to tens of millions (a level-5 merge
+   * output), and a linear scale makes everything below the top of that range a
+   * single pixel. Calibrated so 1k rows ≈ 0.45 and 10M rows ≈ 2.6 — a factor of
+   * six in apparent volume across four orders of magnitude of data, which is
+   * about as much as the eye reads reliably at cluster distance.
+   */
+  function flowSize(rows: number): number {
+    if (!(rows > 0)) return 0.45
+    return clamp(0.45 + (Math.log10(rows) - 3) * 0.54, 0.4, 2.6)
+  }
+
   function flow(route: string, count: number, kind: FlowKind, size?: number, stagger?: number): void {
     if (quiet) return
     if (flowTokens < count) return
@@ -622,7 +638,12 @@ export function createSim(bus: Bus): SimApi {
       ttlMin: ttlSpan > 0 ? ttlBase + ttlSpan : Infinity,
       ttlMax: ttlSpan > 0 ? ttlBase + ttlSpan + BLOCK_TIME_SPAN : Infinity,
       reserved: false,
-      heat: opts.fetched ? 0.3 : 0.8,
+      // A part being created is being WRITTEN, not read. It used to arrive with
+      // read heat, which made every new part in the yard look like something a
+      // SELECT had just touched — the two are now separate channels and the
+      // yard pulses a different colour for each.
+      heat: 0,
+      writeHeat: 1,
       fetched: !!opts.fetched,
     }
 
@@ -672,14 +693,29 @@ export function createSim(bus: Bus): SimApi {
       for (let i = nt.parts.length - 1; i >= 0; i--) {
         const p = nt.parts[i]
         const age = state.t - p.stateSince
-        p.heat = damp(p.heat, 0, 0.5, dt)
+        /* Both channels decay fast enough that the yard's pulse stays an EVENT.
+         *
+         * Read heat used to decay at 0.5, which was slower than the query rate
+         * tops it up at: every active part sat pinned at 1 and the whole yard
+         * pulsed green continuously, which says nothing. At 2.2 a part fades
+         * within about a second of the last query that opened it, so the parts
+         * lit at any moment are the ones a query is actually reading — and with
+         * partition pruning on, that is one partition group and not the yard. */
+        p.heat = damp(p.heat, 0, 2.2, dt)
+        p.writeHeat = damp(p.writeHeat, 0, 1.1, dt)
+        // A merge holds its inputs open and reads every row of them, start to
+        // finish. `reserved` is exactly the window in which that is happening,
+        // so the input parts stay read-hot for as long as the merge runs — which
+        // is what makes "several parts are being consumed to make one" visible
+        // in the yard rather than only on the gantry.
+        if (p.reserved) p.heat = Math.max(p.heat, 0.85)
 
         switch (p.state) {
           case 'temporary':
             // The columns are still being compressed into `tmp_insert_…`.
             if (age >= TEMPORARY_SECONDS) {
               setPartState(node, t, p, 'preactive')
-              flow(rid.commitPart(node), 1, 'part_write', 1.2)
+              flow(rid.commitPart(node), 1, 'part_write', flowSize(p.rows))
             }
             break
           case 'preactive':
@@ -836,8 +872,11 @@ export function createSim(bus: Bus): SimApi {
       return 0
     }
 
-    flow(rid.sortBlock(node), 1, 'block', 1.3)
-    flow(rid.writeColumns(node), Math.min(3, 1 + Math.floor(streams[table] / 8)), 'part_write', 1.1, 0.12)
+    flow(rid.sortBlock(node), 1, 'block', flowSize(rows))
+    // The block is split across the column writers, so each pod carries a share
+    // of it rather than the whole thing.
+    const writers = Math.min(3, 1 + Math.floor(streams[table] / 8))
+    flow(rid.writeColumns(node), writers, 'part_write', flowSize(rows / writers), 0.12)
 
     const nParts = splitByPartition(table, rows)
     const nt = n.tables[table]
@@ -859,7 +898,7 @@ export function createSim(bus: Bus): SimApi {
       // Every part written on a replicated table becomes a `/log` entry, and the
       // sibling replica will fetch it. This is the whole of insert replication.
       if (replicated) appendKeeperLog(node, table, 'GET_PART', part.name)
-      flow(rid.toHotVolume(node), 1, 'part_write', 1.1)
+      flow(rid.toHotVolume(node), 1, 'part_write', flowSize(r))
     }
 
     n.blocksWritten++
@@ -1059,7 +1098,10 @@ export function createSim(bus: Bus): SimApi {
       state.clients.lastInsertTarget = init
       d.insertsInitiated++
       insertCountAcc++
-      flow(rid.clientToNode(init), 1, 'insert', 1.4)
+      // One pod, as big as the batch. `insertBlockRows` is the knob the whole
+      // "batch your inserts" lesson turns on, and this is where turning it down
+      // becomes visible as a swarm of small pods instead of one large one.
+      flow(rid.clientToNode(init), 1, 'insert', flowSize(rows))
       d.activity = Math.min(1, d.activity + 0.3)
 
       for (let s = 0; s < N_SHARDS; s++) {
@@ -1164,7 +1206,7 @@ export function createSim(bus: Bus): SimApi {
     // holds the shard it just hashed a row to writes it locally, with no
     // network hop at all — one of the few genuine wins of writing through a
     // node that is also a data node, which in this cluster is all of them.
-    if (node !== from) flow(rid.fanInsert(from, node), 1, 'insert', 1.3)
+    if (node !== from) flow(rid.fanInsert(from, node), 1, 'insert', flowSize(rows))
     if (K.asyncInsert) queueAsyncInsert(node, table, rows)
     else writeBlock(node, table, rows)
   }
@@ -1262,7 +1304,10 @@ export function createSim(bus: Bus): SimApi {
     noteClientStatement(init)
     state.clients.lastSelectTarget = init
     d.queriesInitiated++
-    flow(rid.clientToNode(init), 1, 'query', 1.2)
+    // A SELECT leaving the client is a STATEMENT, not data: a few hundred bytes
+    // of SQL however much it is about to read. The pods that come back are the
+    // ones that carry volume.
+    flow(rid.clientToNode(init), 1, 'query', 0.6)
     let fanned = 0
     for (let s = 0; s < N_SHARDS; s++) {
       const primary = pickReplica(s, false)
@@ -1341,7 +1386,10 @@ export function createSim(bus: Bus): SimApi {
       const tightness = keyCol && keyCol.ratio > 20 ? 0.004 : keyCol && keyCol.ratio > 5 ? 0.02 : 0.09
       granulesAfterKey = Math.max(1, Math.round(granulesTotal * tightness * (0.6 + rng() * 0.8)))
     }
-    flow(rid.probeIndex(node), 1, 'mark_read', 1.0)
+    // The index probe carries the granules it had to consider, which is why a
+    // query with no usable key prefix sends a visibly bigger pod up the tower
+    // than one that lands on a narrow range.
+    flow(rid.probeIndex(node), 1, 'mark_read', flowSize(granulesTotal))
 
     /* --- 3. skip indexes ------------------------------------------------ */
     let granulesAfterSkip = granulesAfterKey
@@ -1354,7 +1402,7 @@ export function createSim(bus: Bus): SimApi {
       const blocks = Math.ceil(granulesAfterKey / block)
       const survivingBlocks = Math.max(1, Math.round(blocks * (1 - idx.selectivity)))
       granulesAfterSkip = Math.min(granulesAfterKey, survivingBlocks * block)
-      flow(rid.probeSkip(node), 1, 'mark_read', 0.9)
+      flow(rid.probeSkip(node), 1, 'mark_read', flowSize(granulesAfterKey))
     }
 
     granulesAfterSkip = Math.max(1, Math.round(granulesAfterSkip * share))
@@ -1363,7 +1411,7 @@ export function createSim(bus: Bus): SimApi {
     const marksNeeded = granulesAfterSkip * streams[table]
     const markBytes = marksNeeded * MARK_BYTES
     const markHit = touchCache(n.markCache, markBytes, markWorkingSet(node, table))
-    flow(rid.markToPool(node), 1, 'mark_read', 0.85)
+    flow(rid.markToPool(node), 1, 'mark_read', flowSize(marksNeeded))
 
     /* --- 5. bytes, threads, and time ------------------------------------ */
     const rowsRead = granulesAfterSkip * INDEX_GRANULARITY
@@ -1430,7 +1478,7 @@ export function createSim(bus: Bus): SimApi {
     nt.heat = Math.min(1, nt.heat + 0.25)
     // Only a remote shard costs a network hop. The initiator's own share of the
     // reading never leaves the machine.
-    if (node !== initiator) flow(rid.fanQuery(initiator, node), 1, 'query', 1.15)
+    if (node !== initiator) flow(rid.fanQuery(initiator, node), 1, 'query', 0.65)
 
     /* --- hand the mark ranges to the pool ------------------------------- */
     assignReaders(node, q)
@@ -1470,7 +1518,9 @@ export function createSim(bus: Bus): SimApi {
       r.blockCacheHit = K.uncompressedCacheMib > 0 && n.uncompressedCache.hitRatio > rng()
       readerQuery[node * N_READ_THREADS + r.slot] = q.id
       readerDuration[node * N_READ_THREADS + r.slot] = q.duration
-      flow(rid.poolToReader(node, r.slot), 1, 'mark_read', 0.85)
+      // The pod handed to a thread is that thread's OWN mark range, so the
+      // pool's uneven dealing — biggest task first — is visible as unequal pods.
+      flow(rid.poolToReader(node, r.slot), 1, 'mark_read', flowSize((r.markEnd - r.markBegin) * INDEX_GRANULARITY))
       assigned++
     }
   }
@@ -1508,7 +1558,9 @@ export function createSim(bus: Bus): SimApi {
       r.column = Math.min(TABLES[0].columns.length - 1, Math.floor(p * 4))
 
       if (r.state === 'reading' && rng() < dt * 8) {
-        flow(rid.readerToResult(node), 1, 'column_read', 0.9)
+        // One column stripe out of the range this thread is on, so a thread with
+        // a big range sends visibly bigger stripes than one with a small range.
+        flow(rid.readerToResult(node), 1, 'column_read', flowSize(((r.markEnd - r.markBegin) * INDEX_GRANULARITY) / 4))
       }
 
       if (p >= 1) {
@@ -1539,14 +1591,17 @@ export function createSim(bus: Bus): SimApi {
         // data distribution alone would have spread.
         const d = nodes[q.initiator].distributed
         if (node !== q.initiator) {
-          flow(rid.fanResult(node, q.initiator), 1, 'result', 1.1)
+          flow(rid.fanResult(node, q.initiator), 1, 'result', flowSize(q.rowsRead))
           // Bytes over the wire, which is what `bytesFromRemote` means. The
           // initiator's own share never crosses it.
           d.bytesFromRemote += q.bytesRead
         }
         d.rowsMerged += q.rowsRead
         d.activity = Math.min(1, d.activity + 0.2)
-        flow(rid.nodeToClient(q.initiator), 1, 'result', 1.0)
+        // The answer to an aggregate is a handful of rows however many were
+        // scanned to produce it. That asymmetry — a huge read, a tiny answer —
+        // is the shape of every analytical query and is worth drawing.
+        flow(rid.nodeToClient(q.initiator), 1, 'result', 0.7)
         queryMsAcc += q.duration * 1000
         queryMsCount++
         n.queries.splice(i, 1)
@@ -1796,6 +1851,10 @@ export function createSim(bus: Bus): SimApi {
     let level = 0
     for (const p of inputs) {
       p.reserved = true
+      // Read-hot from the instant it is reserved, not from the next step's
+      // tickParts: the selector runs after tickParts in the same step, so
+      // deferring this left every merge's first frame showing cold inputs.
+      p.heat = Math.max(p.heat, 0.85)
       rows += p.rows
       bytes += p.bytesOnDisk
       if (p.minBlock < minBlock) minBlock = p.minBlock
@@ -1884,7 +1943,9 @@ export function createSim(bus: Bus): SimApi {
     mergeMaxBlock.set(slot.slot + node * N_MERGE_SLOTS, maxBlock)
     mergeLevel.set(slot.slot + node * N_MERGE_SLOTS, level + 1)
 
-    flow(rid.yardToMerge(node), Math.min(4, inputs.length), 'merge', 1.3, 0.2)
+    // One pod per input part, each as big as that part. Several small pods going
+    // in and one large pod coming back out IS the merge.
+    flow(rid.yardToMerge(node), Math.min(4, inputs.length), 'merge', flowSize(rows / inputs.length), 0.2)
     bus.emit('merge:start', { node, table, reason: candidate.reason })
 
     // A merge decided on one replica is not repeated independently on the other:
@@ -1931,7 +1992,9 @@ export function createSim(bus: Bus): SimApi {
       }
 
       mergeRowsAcc[node] += m.totalRows * (dt * rate / m.duration)
-      if (rng() < dt * 6) flow(rid.yardToMerge(node), 1, 'merge', 1.0)
+      if (rng() < dt * 6) {
+        flow(rid.yardToMerge(node), 1, 'merge', flowSize(m.totalRows / Math.max(1, m.sourceParts.length)))
+      }
 
       if (p < 1) continue
 
@@ -1947,7 +2010,10 @@ export function createSim(bus: Bus): SimApi {
       let inputTtlBase = state.t
       let droppedRows = 0
       for (const p2 of nt.parts) {
-        if (!m.sourceSlots.includes(p2.slot)) continue
+        // By NAME, not by slot. A part beyond the yard's window has slot -1, and
+        // so does every other part beyond it — matching on the slot retired every
+        // unslotted part in the table the moment one of them was merged.
+        if (!m.sourceParts.includes(p2.name)) continue
         p2.reserved = false
         if (p2.ttlMin < inputTtlBase) inputTtlBase = p2.ttlMin
         droppedRows += p2.rows
@@ -1972,18 +2038,18 @@ export function createSim(bus: Bus): SimApi {
           if (m.reason === 'ttl_delete' || m.reason === 'ttl_recompress') {
             ttlMergedAt.set(out.name, state.t)
           }
-          if (volume === 1) flow(rid.hotToCold(node), 2, 'move', 1.2, 0.2)
+          if (volume === 1) flow(rid.hotToCold(node), 2, 'move', flowSize(resultRows / 2), 0.2)
         }
-        flow(rid.mergeToYard(node), 2, 'merge', 1.4, 0.15)
+        flow(rid.mergeToYard(node), 2, 'merge', flowSize(resultRows / 2), 0.15)
       } else {
         // Everything in it had expired. With `ttl_only_drop_parts` this is the
         // whole of the TTL: no rewrite, no new part, just one `rmdir`.
-        flow(rid.ttlDrop(node), 3, 'ttl', 1.2, 0.2)
+        flow(rid.ttlDrop(node), 3, 'ttl', flowSize(m.totalRows / 3), 0.2)
       }
 
       if (droppedRows > 0 && (m.reason === 'ttl_delete' || m.reason === 'ttl_recompress')) {
         bus.emit('ttl:drop', { node, table, rows: droppedRows })
-        flow(rid.yardToTtl(node), 2, 'ttl', 1.2, 0.15)
+        flow(rid.yardToTtl(node), 2, 'ttl', flowSize(droppedRows / 2), 0.15)
       }
 
       nt.partsMerged++
@@ -2081,7 +2147,7 @@ export function createSim(bus: Bus): SimApi {
       if (out) setPartState(node, 0, out, 'preactive')
       mut.partsDone++
       if (mut.partsDone >= mut.partsToDo) mut.state = 'done'
-      flow(rid.yardToMerge(node), 1, 'merge', 1.1)
+      flow(rid.yardToMerge(node), 1, 'merge', flowSize(target.rows))
     }
   }
 

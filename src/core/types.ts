@@ -28,6 +28,17 @@ export const N_KEEPERS = 3
  */
 export const N_PART_SLOTS = 96
 
+/**
+ * Merge-level lanes the yard draws, per partition.
+ *
+ * A part's LANE is its `level`, and the last lane is "this level or deeper", so
+ * the yard has a fixed depth however many rounds of merging the cluster has
+ * done. This is the whole reason the yard is laid out the way it is: a merge
+ * takes several parts out of lane `x-1` and puts ONE part into lane `x`, and
+ * that is the only picture that makes `level` mean anything.
+ */
+export const N_LEVEL_LANES = 5
+
 /** `index_granularity` — rows per mark, and ClickHouse's real default. */
 export const INDEX_GRANULARITY = 8192
 
@@ -342,8 +353,20 @@ export interface PartSim {
   ttlMax: number
   /** True while a merge or mutation has this part as an input. */
   reserved: boolean
-  /** 0..1 — how recently this part was read. Drives the yard's heat. */
+  /**
+   * 0..1 — how recently this part was READ: selected by a SELECT, or opened as
+   * the input of a merge. Drives the yard's green pulse.
+   */
   heat: number
+  /**
+   * 0..1 — how recently this part was WRITTEN. Drives the yard's red pulse.
+   *
+   * A part is never written to twice: a directory is created, renamed into
+   * place, and from then on it is immutable. So this is the recency of the
+   * part's own creation — by an INSERT, by a merge, or by a fetch — and it
+   * decaying to zero is the part becoming ordinary stored data.
+   */
+  writeHeat: number
   /** True if this part arrived by fetch from the sibling replica, not by INSERT. */
   fetched: boolean
 }
@@ -809,6 +832,44 @@ export type FlowKind =
   | 'move' // a part moving between volumes
   | 'stat'
 
+/**
+ * Which side of the read/write axis a kind of packet is on.
+ *
+ * This is a CONTRACT, not a rendering detail, which is why it lives here: the
+ * engine paints packets from it and the inspector's swatch reads from it, and
+ * the two disagreeing would mean clicking a red pod produced a green chip.
+ *
+ * `merge`, `ttl`, `move` and `keeper` are `none` on purpose. They are not on
+ * either path: a merge reads parts and writes a part, on its own schedule, for
+ * nobody's statement. Painting background work red would say an INSERT was
+ * arriving when none was.
+ */
+export type FlowAxis = 'write' | 'read' | 'none'
+
+export const FLOW_AXIS: Record<FlowKind, FlowAxis> = {
+  insert: 'write',
+  block: 'write',
+  part_write: 'write',
+  query: 'read',
+  result: 'read',
+  mark_read: 'read',
+  column_read: 'read',
+  merge: 'none',
+  ttl: 'none',
+  // The receiving replica really is writing a part directory it did not have.
+  fetch: 'write',
+  keeper: 'none',
+  move: 'none',
+  stat: 'none',
+}
+
+/** The palette entry a packet of this kind is painted with. */
+export function flowAxisColorKey(kind: FlowKind | undefined): ColorKey | null {
+  if (kind === undefined) return null
+  const axis = FLOW_AXIS[kind]
+  return axis === 'write' ? 'flowWrite' : axis === 'read' ? 'flowRead' : null
+}
+
 /** A request to send N particles down a named route. */
 export interface FlowRequest {
   route: string
@@ -817,6 +878,11 @@ export interface FlowRequest {
   color?: number
   /** world units/sec; defaults to the route's speed */
   speed?: number
+  /**
+   * Packet bulk, 1 being the route's own. This is the BATCH: the sim derives it
+   * from the row count of the block, the mark range or the merge that is
+   * actually moving, via `flowSize()`. Clamped by the engine.
+   */
   size?: number
   kind?: FlowKind
   /** lateral jitter in world units */
@@ -1016,6 +1082,8 @@ export type ColorKey =
   | 'partPreactive'
   | 'partTemporary'
   | 'partExpired'
+  | 'flowWrite'
+  | 'flowRead'
   | 'primaryIndex'
   | 'skipIndex'
   | 'markCache'

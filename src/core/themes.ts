@@ -60,6 +60,19 @@ export const NIGHT_PALETTE: Record<ColorKey, number> = {
   partTemporary: 0x9a8cff, // temporary — tmp_insert_…, invisible
   partExpired: 0xff6b8a, // every row past its TTL
 
+  /* --- the read/write axis ------------------------------------------------
+   * The second semantic axis in the model, and the only one that applies to
+   * BOTH a moving packet and a standing part: red is data being written, green
+   * is data being read. A packet on the write path is red wherever it is, a
+   * packet on the read path is green, a part pulses red while it is being
+   * written and green while it is being read.
+   *
+   * Deliberately a lime green rather than the emerald of `partActive`: they are
+   * neighbours in meaning — an active part is a readable part — and they must
+   * not be confusable, because one is a STATE and the other is an ACTIVITY. */
+  flowWrite: 0xff4d5e,
+  flowRead: 0x7cff5a,
+
   primaryIndex: 0xffd166, // primary.cidx — the sparse index, in RAM
   skipIndex: 0x64ffda, // skp_idx_*.idx2
   markCache: 0xffa94d, // .mrk3 offsets, cached
@@ -114,6 +127,12 @@ export const DAY_PALETTE: Record<ColorKey, number> = {
   partPreactive: 0x1673ad,
   partTemporary: 0x4b3fbd,
   partExpired: 0xc42a4c,
+
+  // Both sit BELOW the stone in lightness, and the green is pushed to 42% and
+  // desaturated a shade: a lime bright enough to read at night is invisible
+  // against #cbc4b1 pavement at noon.
+  flowWrite: 0xd11f33,
+  flowRead: 0x3f8f0c,
 
   primaryIndex: 0xa87c05,
   skipIndex: 0x05a47e,

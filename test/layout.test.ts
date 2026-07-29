@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   DEFAULT_KNOBS,
   INDEX_GRANULARITY,
+  N_LEVEL_LANES,
   N_MERGE_SLOTS,
   N_NODES,
   N_PART_SLOTS,
@@ -27,7 +28,11 @@ import {
   nodeIndex,
   nodeLocal,
   nodeOrigin,
-  partSlotLocal,
+  partCellPitch,
+  partLaneZ,
+  partLevelLane,
+  partPlaceLocal,
+  partitionGroupX,
   queueSlotLocal,
   readerBayLocal,
   replicaOf,
@@ -156,21 +161,83 @@ describe('the cluster plan', () => {
     }
   })
 
-  it('every part slot has a distinct position inside the deck', () => {
-    const seen = new Set<string>()
+  it('every part in a cell has a distinct position inside the deck', () => {
     const halfW = CITY.yard.deckW / 2
     const halfD = CITY.yard.deckD / 2
+    // Both regimes: a cell at full pitch, and a cell squeezed well past `cols`.
+    const counts = [1, 2, CITY.yard.cols, CITY.yard.cols + 1, N_PART_SLOTS]
     for (let t = 0; t < N_TABLES; t++) {
-      for (let i = 0; i < N_PART_SLOTS; i++) {
-        const p = partSlotLocal(t, i)
-        const key = `${p[0].toFixed(3)}|${p[2].toFixed(3)}`
-        expect(seen.has(key), `slot ${t}:${i} collides`).toBe(false)
-        seen.add(key)
-        // Every tower has to stand ON the deck, or it is floating over the pit.
-        expect(Math.abs(p[0])).toBeLessThanOrEqual(halfW)
-        expect(Math.abs(p[2])).toBeLessThanOrEqual(halfD)
+      for (let part = 0; part < TABLES[t].partitions; part++) {
+        for (let lane = 0; lane < N_LEVEL_LANES; lane++) {
+          for (const count of counts) {
+            const seen = new Set<string>()
+            for (let i = 0; i < count; i++) {
+              const p = partPlaceLocal(t, part, lane, i, count)
+              const key = p[0].toFixed(4)
+              expect(seen.has(key), `${t}/${part}/L${lane} ${i} of ${count} collides`).toBe(false)
+              seen.add(key)
+              // Every tower has to stand ON the deck, or it is floating over the pit.
+              expect(Math.abs(p[0])).toBeLessThanOrEqual(halfW)
+              expect(Math.abs(p[2])).toBeLessThanOrEqual(halfD)
+            }
+          }
+        }
       }
     }
+  })
+
+  /**
+   * The single most load-bearing claim the yard makes. A part standing inside a
+   * partition group says "these are the parts I can be merged with" — so a
+   * crowded cell must squeeze rather than spill, however many parts it holds.
+   */
+  it('a cell never spills into the neighbouring partition, however crowded', () => {
+    const half = (CITY.yard.cols * CITY.yard.pitchX) / 2
+    for (let t = 0; t < N_TABLES; t++) {
+      for (let part = 0; part < TABLES[t].partitions; part++) {
+        const centre = partitionGroupX(t, part)
+        for (const count of [1, CITY.yard.cols, CITY.yard.cols * 4, N_PART_SLOTS]) {
+          for (const i of [0, count - 1]) {
+            const x = partPlaceLocal(t, part, 0, i, count)[0]
+            expect(Math.abs(x - centre), `${t}/${part}: ${i} of ${count} left its group`).toBeLessThanOrEqual(half)
+          }
+        }
+      }
+      // …and consecutive groups are genuinely apart, by the whole gap.
+      for (let part = 1; part < TABLES[t].partitions; part++) {
+        const gap = partitionGroupX(t, part) - partitionGroupX(t, part - 1) - CITY.yard.cols * CITY.yard.pitchX
+        expect(gap).toBeCloseTo(CITY.yard.partitionGap, 6)
+      }
+    }
+  })
+
+  it('every merge level has its own lane, inside its own table band', () => {
+    for (let t = 0; t < N_TABLES; t++) {
+      const seen = new Set<number>()
+      for (let lane = 0; lane < N_LEVEL_LANES; lane++) {
+        const z = partLaneZ(t, lane)
+        expect(seen.has(z)).toBe(false)
+        seen.add(z)
+        // A lane may not stray into the next table's band: a merge cannot cross
+        // a table, so the two must never be adjacent enough to be confused.
+        expect(Math.abs(z - bandZLocal(t))).toBeLessThan(CITY.yard.bandPitch / 2)
+      }
+      // Lane order is level order, front to back. A merge output standing in
+      // front of its inputs would tell the story backwards.
+      expect(partLaneZ(t, 1)).toBeGreaterThan(partLaneZ(t, 0))
+    }
+    // Every level deeper than the yard has lanes for lands in the last one, and
+    // no level ever lands outside the range.
+    expect(partLevelLane(0)).toBe(0)
+    expect(partLevelLane(N_LEVEL_LANES - 1)).toBe(N_LEVEL_LANES - 1)
+    expect(partLevelLane(99)).toBe(N_LEVEL_LANES - 1)
+    expect(partLevelLane(-3)).toBe(0)
+  })
+
+  it('a cell at or below capacity uses full pitch, and above it squeezes', () => {
+    expect(partCellPitch(1)).toBe(CITY.yard.pitchX)
+    expect(partCellPitch(CITY.yard.cols)).toBe(CITY.yard.pitchX)
+    expect(partCellPitch(CITY.yard.cols * 2)).toBeCloseTo(CITY.yard.pitchX / 2, 6)
   })
 
   it('each table band is separated from the next', () => {

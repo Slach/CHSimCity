@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { FLOW_AXIS } from '../core/types'
 import type { Bus, FlowKind, FlowRequest, QualitySettings, ThemeApi } from '../core/types'
 import { ROUTES, routeCurve } from '../world/layout'
 import { makeRng, reduceMotion } from '../core/util'
@@ -10,6 +11,14 @@ import { makeRng, reduceMotion } from '../core/util'
  * writers, a mark range being handed to a reader thread, three parts entering a
  * merge, a part crossing the wire between replicas, a Keeper log entry: all of
  * them are one instance of one InstancedMesh travelling along one route.
+ *
+ * Two things a packet says on sight, before any label is read:
+ *   - HUE is the read/write axis. Red is data being written, green is data
+ *     being answered out. See KIND_AXIS for what is deliberately neither.
+ *   - BULK is the batch. `size` comes from the row count of the real block,
+ *     scaled logarithmically, so one 100k-row INSERT is visibly one big pod and
+ *     a hundred 1k-row INSERTs are visibly a hundred small ones — which is the
+ *     whole argument for batching, made without a single number on screen.
  *
  * Hard rules that shape this file:
  *   - one draw call for the whole cluster's traffic;
@@ -65,6 +74,22 @@ const KIND_W = Float32Array.from([1.05, 1.25, 1.35, 1.0, 0.95, 0.8, 1.15, 1.4, 1
 const KIND_L = Float32Array.from([1.0, 1.0, 1.05, 0.95, 0.9, 0.72, 1.0, 1.05, 0.95, 1.1, 0.65, 1.0, 0.65])
 const KIND_INDEX = new Map<string, number>()
 for (let i = 0; i < KIND_ORDER.length; i++) KIND_INDEX.set(KIND_ORDER[i], i)
+
+/**
+ * A packet's HUE is its read/write axis and nothing else, so "is this cluster
+ * writing or answering questions right now" is readable from across the plan
+ * without knowing a single route. FLOW_AXIS in core/types.ts is the one owner of
+ * that mapping — the inspector paints its swatch from the same table.
+ *
+ * Flattened to a byte array in KIND_ORDER order because emit() runs on every
+ * spawn: 0 = neither, 1 = write, 2 = read.
+ */
+const AXIS_NONE = 0
+const AXIS_WRITE = 1
+const AXIS_READ = 2
+const KIND_AXIS = Uint8Array.from(
+  KIND_ORDER.map((k) => (FLOW_AXIS[k] === 'write' ? AXIS_WRITE : FLOW_AXIS[k] === 'read' ? AXIS_READ : AXIS_NONE)),
+)
 
 /* ---------------------------------------------------------------------------
  * Baked routes.
@@ -496,9 +521,21 @@ export function createFlows(
     }
     const b = bakes[r]
     const count = Math.min(MAX_BURST, Math.max(1, Math.round(req.count ?? 1)))
-    const color = req.color ?? b.color
+    const kindAxis = req.kind !== undefined ? KIND_AXIS[KIND_INDEX.get(req.kind) ?? KIND_DEFAULT] ?? AXIS_NONE : AXIS_NONE
+    // The axis wins over the route's own colour — but only when the caller did
+    // not name one, so an explicit `color` is still an explicit colour. Read
+    // from `theme.color` HERE rather than at bake time: the palette object is
+    // mutated in place by the theme switch, and a snapshot would leave every
+    // packet in the night colour after a switch to day.
+    const axisColor =
+      kindAxis === AXIS_WRITE ? theme.color.flowWrite : kindAxis === AXIS_READ ? theme.color.flowRead : b.color
+    const color = req.color ?? axisColor
     const speed = req.speed ?? b.speed
-    const size = req.size ?? b.size
+    // A packet's BULK is how much data it is carrying — see FlowRequest.size,
+    // which the model derives from the row count of the actual batch. Clamped
+    // because a pod wider than the road it is on stops reading as freight and
+    // starts reading as a wall.
+    const size = Math.min(3.2, Math.max(0.3, req.size ?? b.size))
     const spread = req.spread ?? 1.0
     const kind = req.kind !== undefined ? (KIND_INDEX.get(req.kind) ?? KIND_DEFAULT) : KIND_DEFAULT
     const stagger = req.stagger ?? 0

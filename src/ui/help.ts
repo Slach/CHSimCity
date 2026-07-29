@@ -71,6 +71,11 @@ const PART_STATES: [string, string, string][] = [
 ]
 
 const LEGEND: [string, string, string][] = [
+  // The read/write axis comes first: it is the one code that applies to both a
+  // moving packet and a standing part, so it is worth reading before any of the
+  // per-mechanism colours below.
+  ['flowWrite', 'being written', 'every packet on the write path, and a part while it is created'],
+  ['flowRead', 'being read', 'every packet on the read path, and a part while a query or a merge opens it'],
   ['primaryIndex', 'primary index', 'primary.cidx — one key row per granule'],
   ['skipIndex', 'skip indexes', 'skp_idx_*.idx2 — they only remove work'],
   ['markCache', 'mark cache', '.mrk3 offsets, and the seeking phase'],

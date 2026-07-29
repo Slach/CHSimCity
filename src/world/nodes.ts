@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { COLOR } from '../core/theme'
 import {
   INDEX_GRANULARITY,
+  N_LEVEL_LANES,
   N_MERGE_SLOTS,
   N_NODES,
   N_PART_SLOTS,
@@ -9,7 +10,7 @@ import {
   N_READ_THREADS,
 } from '../core/types'
 import type { PartSim, PartState, SimState, WorldFactory, WorldModule } from '../core/types'
-import { clamp, clamp01, damp, fmtBytes, fmtNum, makeRng } from '../core/util'
+import { clamp, clamp01, damp, fmtBytes, fmtNum, makeRng, partitionId } from '../core/util'
 import {
   CITY,
   LOCAL,
@@ -20,12 +21,19 @@ import {
   nodeHost,
   nodeLocal,
   nodeOrigin,
-  partSlotLocal,
+  partCellPitch,
+  partLaneZ,
+  partLevelLane,
+  partPlaceLocal,
+  partitionGroupX,
   queueSlotLocal,
   readerBayLocal,
   replicaOf,
   shardOf,
   streamCount,
+  yardCellWidth,
+  yardHalfWidth,
+  yardTableHalfWidth,
 } from './layout'
 
 /* ============================================================================
@@ -46,7 +54,8 @@ import {
  *                            tanks whose fill is what is resident.
  *   PARTS YARD (centre)      `system.parts`. One tower per part, HEIGHT = rows,
  *                            COLOUR = state, standing over the excavation the
- *                            data actually lives in. One band per table.
+ *                            data actually lives in. One band per TABLE, one
+ *                            group per PARTITION, one lane per merge LEVEL.
  *   READ POOL (east)         `MergeTreeReadPool` and its reader threads.
  *   MERGE GANTRY (south)     `system.merges`. A beam down onto every input part.
  *   TTL WORKS (south-east)   where expired rows are removed, or moved.
@@ -57,10 +66,22 @@ import {
  * else in the cluster is allowed those five colours. A green tower is a part a
  * SELECT can see; a grey one has been merged away and is only still there
  * because a running query might be reading it.
+ *
+ * On top of that, and only on top of it, a part PULSES: red while it is being
+ * written, green while it is being read. That is the same red/green axis the
+ * moving packets use, and it is a temporal channel rather than a second palette
+ * — at rest a tower's colour is still exactly its state. The pulse is what makes
+ * a background merge legible: its input parts blink green in lane `x-1` because
+ * they are being read, and one part blinks red in lane `x` because it is being
+ * written.
  * ==========================================================================*/
 
 const Y = CITY.yard
-const HALF_YARD_X = ((Y.cols - 1) * Y.pitchX) / 2
+const HALF_YARD_X = yardHalfWidth()
+/** Widest partition count across the tables — how many cell pads a band needs. */
+const MAX_PARTITIONS = TABLES.reduce((m, t) => Math.max(m, t.partitions), 1)
+/** One pad per (table, partition, level lane). */
+const N_CELL_PADS = N_TABLES * MAX_PARTITIONS * N_LEVEL_LANES
 
 /* --- module-scope scratch: update() must never allocate -------------------- */
 const _p = new THREE.Vector3()
@@ -175,7 +196,8 @@ interface Island {
   /* the yard */
   partMesh: THREE.InstancedMesh
   partCapMesh: THREE.InstancedMesh
-  partSlotMesh: THREE.InstancedMesh
+  /** The (partition, level) grid the towers stand on. */
+  partCellMesh: THREE.InstancedMesh
   /* the primary index */
   indexTower: THREE.Mesh
   indexTicks: THREE.LineSegments
@@ -211,6 +233,17 @@ interface Island {
   /* smoothed per-slot visual state */
   partRise: Float32Array
   partRgb: Float32Array
+  /**
+   * Where each tower currently STANDS, damped toward where it belongs.
+   *
+   * A part's place is derived from its partition, its level and its rank among
+   * its neighbours, so it moves when a neighbour is merged away or when the cell
+   * squeezes to fit one more. Damping turns that into the yard visibly
+   * compacting instead of towers teleporting sideways.
+   */
+  partX: Float32Array
+  partZ: Float32Array
+  partW: Float32Array
   readerLevel: Float32Array
   mergeLevel: Float32Array
   queueLevel: Float32Array
@@ -335,21 +368,43 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
 
     const totalSlots = N_TABLES * N_PART_SLOTS
 
-    // The empty slot markers: a flat plate under every position, so the yard has
-    // a visible capacity and "how full is it" is answerable at a glance.
-    const partSlotMesh = new THREE.InstancedMesh(unitBox, matTrim, totalSlots)
-    partSlotMesh.name = 'yard.slots'
-    partSlotMesh.frustumCulled = false
-    partSlotMesh.raycast = () => {}
-    partSlotMesh.userData.chNoShadow = true
+    /* The grid the towers stand on: one flat pad per (partition, merge level).
+     *
+     * This replaces the old one-pad-per-slot capacity grid, and it is a better
+     * trade. The pads no longer say "the yard holds 96 towers" — a number that
+     * was never a fact about ClickHouse — they say which parts could legally be
+     * merged with which, which is. An empty pad in lane 3 of one partition means
+     * that partition has nothing at level 3, and that is a real answer. */
+    const partCellMesh = new THREE.InstancedMesh(unitBox, matTrim, N_CELL_PADS)
+    partCellMesh.name = 'yard.cells'
+    partCellMesh.frustumCulled = false
+    partCellMesh.raycast = () => {}
+    partCellMesh.userData.chNoShadow = true
     for (let t = 0; t < N_TABLES; t++) {
-      for (let s = 0; s < N_PART_SLOTS; s++) {
-        const p = partSlotLocal(t, s)
-        setBox(partSlotMesh, t * N_PART_SLOTS + s, p[0], Y.baseY + 0.06, p[2], Y.pitchX * 0.74, 0.12, Y.pitchZ * 0.7)
+      for (let p = 0; p < MAX_PARTITIONS; p++) {
+        for (let lane = 0; lane < N_LEVEL_LANES; lane++) {
+          const i = (t * MAX_PARTITIONS + p) * N_LEVEL_LANES + lane
+          // A table with fewer partitions than the widest one has no pad there:
+          // the partition does not exist, so nothing may suggest it does.
+          if (p >= TABLES[t].partitions) {
+            parkBox(partCellMesh, i)
+            continue
+          }
+          setBox(
+            partCellMesh,
+            i,
+            partitionGroupX(t, p),
+            Y.baseY + 0.06,
+            partLaneZ(t, lane),
+            yardCellWidth() - 0.5,
+            0.12,
+            Y.pitchZ * 0.72,
+          )
+        }
       }
     }
-    partSlotMesh.instanceMatrix.needsUpdate = true
-    g.add(partSlotMesh)
+    partCellMesh.instanceMatrix.needsUpdate = true
+    g.add(partCellMesh)
 
     const partMesh = new THREE.InstancedMesh(unitBox, matPart, totalSlots)
     partMesh.name = 'yard.parts'
@@ -364,9 +419,9 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
     partMesh.instanceColor!.setUsage(THREE.DynamicDrawUsage)
     g.add(partMesh)
 
-    // The cap: a thin neon plate on top of each tower whose brightness carries
-    // the merge LEVEL. A level-0 part is dark on top; a level-5 part has a lit
-    // roof. That is the one property of a part you cannot read from its height.
+    // The cap: a thin neon plate on top of a tower that has been rewritten by a
+    // MUTATION. It used to carry the merge level, which the lanes now say far
+    // better; a mutation version has nowhere else to appear.
     const partCapMesh = new THREE.InstancedMesh(unitBox, neonWhite, totalSlots)
     partCapMesh.name = 'yard.caps'
     partCapMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
@@ -380,18 +435,35 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
     partCapMesh.instanceColor!.setUsage(THREE.DynamicDrawUsage)
     g.add(partCapMesh)
 
-    // One band nameplate per table, on the deck's west edge.
-    for (let t = 0; t < N_TABLES; t++) {
-      const tex = theme.textTexture(TABLES[t].name, { size: 44, color: '#dbe7ff' })
-      const plateGeo = own(new THREE.PlaneGeometry(13, 3.1))
+    /* The yard's three axes are only readable if they are named, so all three
+     * are: the table on the west kerb, the partition id along the north edge of
+     * its group, and the merge level at the head of each lane on the east. */
+    const decal = (text: string, size: number, w: number, h: number, x: number, z: number): void => {
+      const tex = theme.textTexture(text, { size, color: '#dbe7ff' })
+      const plateGeo = own(new THREE.PlaneGeometry(w, h))
       const plateMat = own(
         new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false }),
       )
       const plate = new THREE.Mesh(plateGeo, plateMat)
       plate.rotation.x = -Math.PI / 2
-      plate.position.set(-HALF_YARD_X - 9, Y.baseY + 0.2, bandZLocal(t))
+      plate.position.set(x, Y.baseY + 0.2, z)
       plate.raycast = () => {}
       g.add(plate)
+    }
+
+    for (let t = 0; t < N_TABLES; t++) {
+      decal(TABLES[t].name, 44, 13, 3.1, -HALF_YARD_X - 9, bandZLocal(t))
+      const northZ = partLaneZ(t, 0) - Y.pitchZ * 0.95
+      for (let p = 0; p < TABLES[t].partitions; p++) {
+        // The real `partition_id`, so the plate matches the leading field of
+        // every part name standing on it.
+        decal(partitionId(p), 30, yardCellWidth() * 0.8, 2.1, partitionGroupX(t, p), northZ)
+      }
+      const laneX = yardTableHalfWidth(t) + 4.4
+      for (let lane = 0; lane < N_LEVEL_LANES; lane++) {
+        // The deepest lane is a bucket, not a level, and says so.
+        decal(lane === N_LEVEL_LANES - 1 ? `${lane}+` : `${lane}`, 26, 2.4, 2.4, laneX, partLaneZ(t, lane))
+      }
     }
 
     /* ---- the primary index --------------------------------------------- */
@@ -821,7 +893,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       group: g,
       partMesh,
       partCapMesh,
-      partSlotMesh,
+      partCellMesh,
       indexTower,
       indexTicks,
       indexBeam,
@@ -846,6 +918,12 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       proxies: isl.proxies,
       partRise: new Float32Array(totalSlots),
       partRgb: new Float32Array(totalSlots * 3),
+      // NaN would be a valid "no position yet" marker but poisons the damp; 0 is
+      // the deck's centre and the first frame snaps out of it, so instead the
+      // rise being zero is what says "this tower has never stood anywhere".
+      partX: new Float32Array(totalSlots),
+      partZ: new Float32Array(totalSlots),
+      partW: new Float32Array(totalSlots),
       readerLevel: new Float32Array(N_READ_THREADS),
       mergeLevel: new Float32Array(N_MERGE_SLOTS),
       queueLevel: new Float32Array(N_QUEUE_SLOTS),
@@ -930,7 +1008,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
     ctx.register({
       id: `node.${n}.yard`,
       name: 'system.parts',
-      role: 'one tower per part — height is rows, colour is state',
+      role: 'one tower per part — partition across, merge level back, rows up',
       kind: 'storage',
       district: 'nodes',
       object: P.yard,
@@ -1313,10 +1391,20 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
         // inputs are all beyond the window still runs, it just has no beam.
         const drawn = m.active ? m.sourceSlots.filter((sl) => sl >= 0) : []
         if (drawn.length > 0) {
+          /* Read the positions updateYard just DAMPED rather than recomputing
+           * them: the inputs are in the lane and the partition group they are
+           * drawn in, and a beam that recomputed the place would drift off them
+           * every time the cell squeezed. Same reason engine/flows.ts picks out
+           * of the instance matrix. */
           let cx = 0
-          for (const slot of drawn) cx += partSlotLocal(m.table, slot)[0]
+          let cz = 0
+          for (const slot of drawn) {
+            const k = m.table * N_PART_SLOTS + slot
+            cx += isl.partX[k]
+            cz += isl.partZ[k]
+          }
           cx /= drawn.length
-          const cz = bandZLocal(m.table)
+          cz /= drawn.length
           beamTargetX[i] = cx
           beamTargetZ[i] = cz
           const top = 15 - 4
@@ -1432,10 +1520,23 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
   function dimDown(obj: THREE.Object3D): void {
     const mesh = obj as THREE.InstancedMesh
     if (mesh.isInstancedMesh !== true || !mesh.instanceColor) return
-    if (mesh.name === 'yard.slots') return
+    if (mesh.name === 'yard.cells') return
     const arr = mesh.instanceColor.array as Float32Array
     for (let i = 0; i < arr.length; i++) arr[i] *= 0.12
     mesh.instanceColor.needsUpdate = true
+  }
+
+  /**
+   * How many parts share each (partition, level) cell of the table being drawn,
+   * and how many of them have been placed so far. Module scratch, refilled per
+   * table: update() must not allocate.
+   */
+  const cellCount = new Int32Array(MAX_PARTITIONS * N_LEVEL_LANES)
+  const cellSeen = new Int32Array(MAX_PARTITIONS * N_LEVEL_LANES)
+
+  /** Which cell a part belongs in — its partition, and its merge level's lane. */
+  function cellKey(p: PartSim): number {
+    return p.partition * N_LEVEL_LANES + partLevelLane(p.level)
   }
 
   function updateYard(isl: Island, sim: SimState, dt: number): void {
@@ -1449,13 +1550,26 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
 
     for (let tb = 0; tb < N_TABLES; tb++) {
       const nt = nd.tables[tb]
+      /* Two passes over one table's parts, because a part's spacing depends on
+       * how crowded its cell is and that is not known until all of them are
+       * counted. The rank handed to drawPart is the part's index in
+       * `nt.parts`, which is creation order — and within one partition at one
+       * level that is block order, so a cell reads left to right in the order
+       * its rows arrived. */
+      cellCount.fill(0)
+      cellSeen.fill(0)
       for (const p of nt.parts) {
         // slot -1 means the part is beyond the yard's window: fully simulated,
         // counted in every total, and simply not drawn. See PartSim.slot.
         if (p.slot < 0) continue
+        cellCount[cellKey(p)]++
+      }
+      for (const p of nt.parts) {
+        if (p.slot < 0) continue
+        const k = cellKey(p)
         const i = tb * N_PART_SLOTS + p.slot
         occupied[i] = 1
-        drawPart(isl, i, tb, p, dt)
+        drawPart(isl, i, tb, p, cellSeen[k]++, cellCount[k], dt)
       }
     }
 
@@ -1463,13 +1577,12 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       if (occupied[i]) continue
       if (isl.partRise[i] <= 0.001) continue
       // Sink rather than vanish: a part directory being removed is a real event
-      // and deserves the fraction of a second it takes to read.
+      // and deserves the fraction of a second it takes to read. It sinks where
+      // it stood, so the gap it leaves is the gap its neighbours close.
       isl.partRise[i] = damp(isl.partRise[i], 0, 9, dt)
-      const t2 = Math.floor(i / N_PART_SLOTS)
-      const slot = i % N_PART_SLOTS
-      const pos = partSlotLocal(t2, slot)
       const h = Math.max(0.02, isl.partRise[i])
-      setBox(mesh, i, pos[0], Y.baseY + h / 2, pos[2], Y.pitchX * 0.7, h, Y.pitchZ * 0.66)
+      const w = Math.max(0.05, isl.partW[i])
+      setBox(mesh, i, isl.partX[i], Y.baseY + h / 2, isl.partZ[i], w, h, w)
       const o = i * 3
       isl.partRgb[o] = damp(isl.partRgb[o], 0, 6, dt)
       isl.partRgb[o + 1] = damp(isl.partRgb[o + 1], 0, 6, dt)
@@ -1491,24 +1604,60 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
 
   const occupied = new Uint8Array(N_TABLES * N_PART_SLOTS)
 
-  function drawPart(isl: Island, i: number, table: number, p: PartSim, dt: number): void {
-    const pos = partSlotLocal(table, p.slot)
+  function drawPart(
+    isl: Island,
+    i: number,
+    table: number,
+    p: PartSim,
+    index: number,
+    count: number,
+    dt: number,
+  ): void {
+    const lane = partLevelLane(p.level)
+    const place = partPlaceLocal(table, p.partition, lane, index, count)
     const target = partHeight(p.rows)
+    const fresh = isl.partRise[i] <= 0.001
     // Rise into place rather than appear: a part becoming visible is the moment
     // a commit takes effect, and it is worth seeing happen.
     isl.partRise[i] = damp(isl.partRise[i], target, p.state === 'temporary' ? 5 : 9, dt)
     const h = Math.max(0.05, isl.partRise[i])
 
+    /* FOOTPRINT IS THE MERGE LEVEL, and it is the second half of the lane's
+     * lesson: a level-4 part is one wide block where a level-0 part is a
+     * kerbstone, so a merge is visibly several small things becoming one big
+     * one rather than merely a tower changing lane. Height is still rows — the
+     * two agree, because a deeper part really does hold more rows, and seeing
+     * them agree is what makes the level believable.
+     *
+     * Capped by the cell's own spacing so a crowded cell squeezes its towers
+     * thinner instead of letting them overlap: overlapping towers would make a
+     * part count unreadable exactly when it matters most. */
+    const pitch = partCellPitch(count)
+    let wTarget = Math.min(pitch * 0.86, Y.pitchX * (0.34 + 0.15 * lane))
     // A part on the cold volume is drawn narrower: it is the same data, in a
     // place with less bandwidth.
-    const w = p.volume === 1 ? Y.pitchX * 0.5 : Y.pitchX * 0.7
-    const d = p.volume === 1 ? Y.pitchZ * 0.48 : Y.pitchZ * 0.66
-    setBox(isl.partMesh, i, pos[0], Y.baseY + h / 2, pos[2], w, h, d)
+    if (p.volume === 1) wTarget *= 0.72
+    const d = Math.min(Y.pitchZ * 0.7, Y.pitchZ * (0.34 + 0.1 * lane)) * (p.volume === 1 ? 0.8 : 1)
 
-    // Colour is state. Heat from a recent read is added on top, so the part a
-    // query just touched is visibly the one it touched.
+    // A tower that has just been created snaps to its place; one that is already
+    // standing slides, because it moving means its neighbours changed.
+    if (fresh) {
+      isl.partX[i] = place[0]
+      isl.partZ[i] = place[2]
+      isl.partW[i] = wTarget
+    } else {
+      isl.partX[i] = damp(isl.partX[i], place[0], 7, dt)
+      isl.partZ[i] = damp(isl.partZ[i], place[2], 7, dt)
+      isl.partW[i] = damp(isl.partW[i], wTarget, 7, dt)
+    }
+    const x = isl.partX[i]
+    const z = isl.partZ[i]
+    const w = Math.max(0.05, isl.partW[i])
+    setBox(isl.partMesh, i, x, Y.baseY + h / 2, z, w, h, d)
+
+    // Colour is state, and only state. Activity is a PULSE applied below.
     let hex = partColor(p.state)
-    let gain = partGain(p.state)
+    const gain = partGain(p.state)
     if (p.state === 'active' && p.ttlMax < Infinity) {
       // A part whose rows have started expiring shifts toward the TTL colour in
       // proportion to how much of it is dead. This is the only place in the
@@ -1523,12 +1672,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
         hex = _c.getHex()
       }
     }
-    _c.setHex(hex).multiplyScalar(gain + p.heat * 0.9)
-    if (p.reserved) {
-      // A part a merge has reserved is not a different state — `system.parts`
-      // still says `active` — so it is marked by a pulse rather than a colour.
-      _c.multiplyScalar(0.7 + 0.3 * Math.sin(currentT * 8 + p.slot))
-    }
+    _c.setHex(hex).multiplyScalar(gain)
     if (p.fetched) {
       // A part that arrived by fetch rather than by INSERT gets a trace of the
       // fetch colour, so "where did this part come from" is answerable.
@@ -1540,16 +1684,36 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
     isl.partRgb[o + 1] = damp(isl.partRgb[o + 1], _c.g, 7, dt)
     isl.partRgb[o + 2] = damp(isl.partRgb[o + 2], _c.b, 7, dt)
     _c.setRGB(isl.partRgb[o], isl.partRgb[o + 1], isl.partRgb[o + 2])
+
+    /* THE PULSE — red while written, green while read.
+     *
+     * Applied AFTER the damp, deliberately: damping a blink is how you get a
+     * dull constant glow instead of a blink, and the whole point is that it is
+     * legible as an event. The state colour underneath is what is damped, so a
+     * part still transitions smoothly from `active` to `outdated` while blinking.
+     *
+     * Write wins ties. A part is written exactly once, at the start of its life,
+     * and if a query happens to select it in that same second the interesting
+     * fact is still that it has just been created. */
+    const wr = p.writeHeat
+    const rd = p.heat
+    if (wr > 0.02 || rd > 0.02) {
+      const writing = wr >= rd
+      // Pushed past the bloom threshold, like every other lit thing: a pulse
+      // that only reaches the matte range would be invisible at night.
+      _c2.setHex(writing ? COLOR.flowWrite : COLOR.flowRead).multiplyScalar(2.1)
+      // Phase-offset by the instance so a whole cell does not blink in unison —
+      // in unison it reads as one object flashing, not as several parts.
+      const beat = 0.5 + 0.5 * Math.sin(currentT * 9 + i * 0.7)
+      _c.lerp(_c2, clamp01((writing ? wr : rd) * (0.2 + 0.8 * beat)) * 0.9)
+    }
     isl.partMesh.setColorAt(i, _c)
 
-    // The cap carries the merge level, which is the one property of a part you
-    // cannot read from its height.
-    if (p.state === 'active' && p.level > 0) {
-      setBox(isl.partCapMesh, i, pos[0], Y.baseY + h + 0.18, pos[2], w * 0.9, 0.3, d * 0.9)
-      _c.setHex(COLOR.ok).multiplyScalar(0.25 + clamp01(p.level / 6) * 1.7)
-      isl.partCapMesh.setColorAt(i, _c)
-    } else if (p.mutation > 0) {
-      setBox(isl.partCapMesh, i, pos[0], Y.baseY + h + 0.18, pos[2], w * 0.9, 0.3, d * 0.9)
+    // The cap carries the mutation version — the one thing about a part that
+    // neither its height, its footprint nor its lane can say. The merge level
+    // used to be here and no longer needs to be: it IS the lane now.
+    if (p.mutation > 0) {
+      setBox(isl.partCapMesh, i, x, Y.baseY + h + 0.18, z, w * 0.9, 0.3, d * 0.9)
       _c.setHex(COLOR.mutation).multiplyScalar(1.5)
       isl.partCapMesh.setColorAt(i, _c)
     } else {
@@ -1593,7 +1757,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
 
   function setDetail(level: 0 | 1 | 2): void {
     for (const isl of islands) {
-      isl.partSlotMesh.visible = level >= 1
+      isl.partCellMesh.visible = level >= 1
       isl.partCapMesh.visible = level >= 1
       isl.indexTicks.visible = level >= 1
       isl.readerBarMesh.visible = level >= 1
@@ -1607,7 +1771,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
     for (const isl of islands) {
       isl.partMesh.dispose()
       isl.partCapMesh.dispose()
-      isl.partSlotMesh.dispose()
+      isl.partCellMesh.dispose()
       isl.skipMesh.dispose()
       isl.readerMesh.dispose()
       isl.readerBarMesh.dispose()
