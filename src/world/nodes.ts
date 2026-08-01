@@ -89,6 +89,9 @@ const _sc = new THREE.Vector3()
 const _q = new THREE.Quaternion()
 const _e = new THREE.Euler()
 const _m = new THREE.Matrix4()
+/** Height of one table's primary-index rack. Three of them stand per island. */
+const IDX_H = 20
+
 const _c = new THREE.Color()
 const _c2 = new THREE.Color()
 
@@ -201,7 +204,8 @@ interface Island {
   /* the primary index */
   indexTower: THREE.Mesh
   indexTicks: THREE.LineSegments
-  indexBeam: THREE.Mesh
+  /** One per table band: the beam lights for the table being read. */
+  indexBeams: THREE.Mesh[]
   /* skip indexes */
   skipMesh: THREE.InstancedMesh
   /* caches */
@@ -217,6 +221,7 @@ interface Island {
   mergeMesh: THREE.InstancedMesh
   mergeBarMesh: THREE.InstancedMesh
   mergeBeamMesh: THREE.InstancedMesh
+  readBeamMesh: THREE.InstancedMesh
   /* ttl */
   ttlFurnace: THREE.Mesh
   ttlFlare: THREE.Mesh
@@ -248,7 +253,8 @@ interface Island {
   mergeLevel: Float32Array
   queueLevel: Float32Array
   ttlGlow: number
-  indexGlow: number
+  /** Per table band, because each rack answers for one table. */
+  indexGlow: Float32Array
   skipGlow: Float32Array
 }
 
@@ -471,39 +477,58 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
     // A tall thin tower with a tick per granule. It is the ONLY structure on the
     // island drawn as a pure vertical stack of equal steps, because that is what
     // a sparse index is: one entry per fixed number of rows.
-    const idxH = 30
-    const indexTower = new THREE.Mesh(theme.box(5.4, idxH, 5.4), matStruct)
-    indexTower.name = 'primaryindex.tower'
-    indexTower.position.set(LOCAL.primaryIndex[0], idxH / 2, LOCAL.primaryIndex[2])
-    indexTower.castShadow = true
-    g.add(indexTower)
-    pushBoxEdges(edgeVerts, [LOCAL.primaryIndex[0], idxH / 2, LOCAL.primaryIndex[2], 5.4, idxH, 5.4])
-
+    /* ONE RACK PER TABLE BAND, at the west end of the band it answers for.
+     * There is no table-level primary index in ClickHouse: `primary.cidx` is a
+     * file in every PART, loaded into that part's own memory, and the search
+     * runs once per part in parallel. One tower per island said the opposite —
+     * that three tables share one index that queries walk to. Three racks, each
+     * standing at its own band, say what is true at this scale: the index
+     * belongs to the data beside it. */
+    const idxH = IDX_H
+    const indexTowers: THREE.Mesh[] = []
+    const indexBeams: THREE.Mesh[] = []
     const tickVerts: number[] = []
-    const TICKS = 22
-    for (let i = 0; i < TICKS; i++) {
-      const y = 1.4 + (i / TICKS) * (idxH - 2)
+    for (let t = 0; t < N_TABLES; t++) {
       const x = LOCAL.primaryIndex[0]
-      const z = LOCAL.primaryIndex[2]
-      tickVerts.push(x - 3.4, y, z - 2.8, x + 3.4, y, z - 2.8)
-      tickVerts.push(x - 3.4, y, z + 2.8, x + 3.4, y, z + 2.8)
+      const z = bandZLocal(t)
+      const tower = new THREE.Mesh(theme.box(5.4, idxH, 5.4), matStruct)
+      tower.name = `primaryindex.tower.${t}`
+      tower.position.set(x, idxH / 2, z)
+      tower.castShadow = true
+      g.add(tower)
+      indexTowers.push(tower)
+      pushBoxEdges(edgeVerts, [x, idxH / 2, z, 5.4, idxH, 5.4])
+
+      // A tick per index entry: the only structure on the island drawn as a pure
+      // stack of equal steps, because that is what a sparse index is.
+      const TICKS = 22
+      for (let i = 0; i < TICKS; i++) {
+        const y = 1.4 + (i / TICKS) * (idxH - 2)
+        tickVerts.push(x - 3.4, y, z - 2.8, x + 3.4, y, z - 2.8)
+        tickVerts.push(x - 3.4, y, z + 2.8, x + 3.4, y, z + 2.8)
+      }
+
+      // The search beam: it lights while a query on THIS TABLE is planning, so
+      // you can see which table's index is doing the work.
+      /* Its OWN material, cloned: `theme.neon` hands out a SHARED one, and this
+       * beam's colour is driven every frame. The single beam this replaced was
+       * writing straight into the cached white neon, which every instanced mesh
+       * asking for the same key also holds. */
+      const beam = new THREE.Mesh(own(new THREE.BoxGeometry(1.6, idxH * 0.9, 1.6)), neonWhite.clone())
+      beam.name = `primaryindex.beam.${t}`
+      beam.position.set(x, idxH * 0.5, z)
+      beam.raycast = () => {}
+      beam.userData.chNoShadow = true
+      g.add(beam)
+      indexBeams.push(beam)
     }
+    const indexTower = indexTowers[0]
     const tickGeo = own(new THREE.BufferGeometry())
     tickGeo.setAttribute('position', new THREE.Float32BufferAttribute(tickVerts, 3))
     const indexTicks = new THREE.LineSegments(tickGeo, theme.line(COLOR.primaryIndex, 0.42))
     indexTicks.name = 'primaryindex.granules'
     indexTicks.raycast = () => {}
     g.add(indexTicks)
-
-    // The binary-search beam: it lights the moment a query probes the index, and
-    // its height is where in the key space the search landed.
-    const beamGeo = own(new THREE.BoxGeometry(1.6, idxH * 0.9, 1.6))
-    const indexBeam = new THREE.Mesh(beamGeo, neonWhite)
-    indexBeam.name = 'primaryindex.beam'
-    indexBeam.position.set(LOCAL.primaryIndex[0], idxH * 0.5, LOCAL.primaryIndex[2])
-    indexBeam.raycast = () => {}
-    indexBeam.userData.chNoShadow = true
-    g.add(indexBeam)
 
     /* ---- skip index sheds ---------------------------------------------- */
 
@@ -525,8 +550,10 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
           continue
         }
         const idx = TABLES[t].skipIndexes[k]
-        const x = LOCAL.skipIndexes[0] + (k - 1) * 8
-        const z = LOCAL.skipIndexes[2] + (t - (N_TABLES - 1) / 2) * 11
+        // Beside its own table's band, between that band's primary rack and the
+        // band itself — the order the pipeline runs in, read west to east.
+        const x = LOCAL.skipIndexes[0] + (k - 1) * 7
+        const z = bandZLocal(t)
         // Height is the index's selectivity: a shed that prunes 90% of blocks
         // stands tall, and a `set` that has overflowed is barely a kerbstone.
         const h = 1 + idx.selectivity * 8
@@ -680,6 +707,30 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
     g.add(readerMesh, readerBarMesh)
 
     /* ---- the merge gantry ---------------------------------------------- */
+
+    /* ---- the read beams: which part each thread is reading ------------- */
+
+    /* One beam per reader thread, from its bay down onto the PART its task came
+     * out of, its width the fraction of that part's marks the task covers.
+     * Without them the pool was a box that emitted pods towards its bays and the
+     * yard was a field of towers, and nothing on screen said that a task IS a
+     * mark range inside one named part — which is the single fact that makes
+     * `MergeTreeReadPool` different from a queue of parts. Same construction as
+     * the merge beams below, for the same reason: it points at the position
+     * updateYard damped, never at a recomputed one. */
+    const readBeamMesh = new THREE.InstancedMesh(unitBox, neonSoft, N_READ_THREADS)
+    readBeamMesh.name = 'readpool.beams'
+    readBeamMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+    readBeamMesh.frustumCulled = false
+    readBeamMesh.raycast = () => {}
+    readBeamMesh.userData.chNoShadow = true
+    for (let i = 0; i < N_READ_THREADS; i++) {
+      parkBox(readBeamMesh, i)
+      _c.setRGB(0, 0, 0)
+      readBeamMesh.setColorAt(i, _c)
+    }
+    readBeamMesh.instanceColor!.setUsage(THREE.DynamicDrawUsage)
+    g.add(readBeamMesh)
 
     // A real gantry: two legs and a beam spanning the yard's south side, with a
     // bay per background-pool slot hanging off it.
@@ -896,7 +947,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       partCellMesh,
       indexTower,
       indexTicks,
-      indexBeam,
+      indexBeams,
       skipMesh,
       markFill: markTank.fill,
       blockFill: blockTank.fill,
@@ -908,6 +959,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       mergeMesh,
       mergeBarMesh,
       mergeBeamMesh,
+      readBeamMesh,
       ttlFurnace,
       ttlFlare,
       volFill,
@@ -928,7 +980,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       mergeLevel: new Float32Array(N_MERGE_SLOTS),
       queueLevel: new Float32Array(N_QUEUE_SLOTS),
       ttlGlow: 0,
-      indexGlow: 0,
+      indexGlow: new Float32Array(N_TABLES),
       skipGlow: new Float32Array(MAX_SKIP * N_TABLES),
     }
 
@@ -944,8 +996,8 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
     proxy(built, 'island', 0, 1, 0, CITY.node.w, 10, CITY.node.d)
     proxy(built, 'yard', 0, Y.baseY + Y.maxRise / 2, 0, Y.deckW, Y.maxRise + 4, Y.deckD)
     proxy(built, 'insertdock', 0, 6, LOCAL.insertDock[2], 96, 14, 22)
-    proxy(built, 'primaryindex', LOCAL.primaryIndex[0], idxH / 2, LOCAL.primaryIndex[2], 9, idxH, 9)
-    proxy(built, 'skipindexes', LOCAL.skipIndexes[0], 6, LOCAL.skipIndexes[2], 26, 12, 38)
+    proxy(built, 'primaryindex', LOCAL.primaryIndex[0], idxH / 2, 0, 9, idxH, Math.abs(bandZLocal(0)) * 2 + 10)
+    proxy(built, 'skipindexes', LOCAL.skipIndexes[0], 6, 0, 24, 12, Math.abs(bandZLocal(0)) * 2 + 10)
     proxy(built, 'markcache', LOCAL.markCache[0], deckY + TANK_H / 2, LOCAL.markCache[2], TANK_W, TANK_H + 6, TANK_D)
     proxy(
       built,
@@ -1278,22 +1330,29 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       /* ---- the parts yard --------------------------------------------- */
       updateYard(isl, sim, dt)
 
-      /* ---- the primary index ------------------------------------------ */
-      // The beam lights while any query on this node is in its planning phase,
-      // which in the model is its first fifth.
-      let probing = 0
-      for (const q of nd.queries) {
-        const p = q.duration > 0 ? q.elapsed / q.duration : 1
-        if (p < 0.2) probing = Math.max(probing, 1 - p / 0.2)
+      /* ---- the primary index, one rack per table ---------------------- */
+      // Each rack lights only for queries on ITS OWN table, which is what makes
+      // the racks worth having three of: you can see which table is being read.
+      for (let tb = 0; tb < N_TABLES; tb++) {
+        let probing = 0
+        // How much of the table survived the key search, for the beam's height.
+        let landed = 0.5
+        for (const q of nd.queries) {
+          if (q.table !== tb) continue
+          // The planning phase is the query's first fifth in the model.
+          const p = q.duration > 0 ? q.elapsed / q.duration : 1
+          if (p < 0.2) probing = Math.max(probing, 1 - p / 0.2)
+          landed = clamp01(q.granulesAfterKey / Math.max(1, q.granulesTotal))
+        }
+        isl.indexGlow[tb] = damp(isl.indexGlow[tb], probing, 8, dt)
+        const beam = isl.indexBeams[tb]
+        _c.setHex(COLOR.primaryIndex).multiplyScalar(isl.indexGlow[tb] * 2.2)
+        ;(beam.material as THREE.MeshBasicMaterial).color.copy(_c)
+        // The beam's height is where the search landed in the key space: a tall
+        // beam is a query that had to keep most of the granules.
+        beam.scale.y = 0.12 + landed * 0.9
+        beam.position.y = (IDX_H * 0.9 * beam.scale.y) / 2 + 1
       }
-      isl.indexGlow = damp(isl.indexGlow, probing, 8, dt)
-      const ib = isl.indexBeam.material as THREE.MeshBasicMaterial
-      _c.setHex(COLOR.primaryIndex).multiplyScalar(isl.indexGlow * 2.2)
-      ib.color.copy(_c)
-      // The beam's height is where the binary search landed in the key space.
-      const landed = nd.queries.length > 0 ? clamp01(nd.queries[0].granulesAfterKey / Math.max(1, nd.queries[0].granulesTotal)) : 0.5
-      isl.indexBeam.scale.y = 0.12 + landed * 0.9
-      isl.indexBeam.position.y = (30 * 0.9 * isl.indexBeam.scale.y) / 2 + 1
 
       /* ---- skip index sheds ------------------------------------------- */
       let skipSlot = 0
@@ -1361,7 +1420,35 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
         setBox(isl.readerBarMesh, i, b[0] - 3.6, 5.6 + h / 2 - 0.7, b[2], 0.7, h, 4.4)
         _c.setHex(COLOR.ok).multiplyScalar(active ? 1.3 : 0)
         isl.readerBarMesh.setColorAt(i, _c)
+
+        /* The beam onto the part this task came out of. A part beyond the yard's
+         * window has slot -1: the task is fully simulated, it just has nothing
+         * to point at. */
+        if (active && r.part >= 0) {
+          const k = r.table * N_PART_SLOTS + r.part
+          const px = isl.partX[k]
+          const pz = isl.partZ[k]
+          const top = 7.5
+          const bottom = Y.baseY + 1
+          /* Width IS the task: the share of that part's marks this thread was
+           * given. A pool that hands out `min_marks_for_concurrent_read` at a
+           * time makes several narrow beams onto ONE part; a thread that got a
+           * whole small part makes one wide beam. Floored so a one-granule task
+           * is still visible. */
+          const share = r.marksInPart > 0 ? clamp01((r.markEnd - r.markBegin) / r.marksInPart) : 0.25
+          const w = 0.7 + share * 5
+          setBox(isl.readBeamMesh, i, px, (top + bottom) / 2, pz, w, Math.max(1, top - bottom), w)
+          // Same colour as the bay, so a beam and its thread are one thing.
+          _c.setHex(hex).multiplyScalar(0.45 + 0.35 * Math.sin(t * 7 + i))
+          isl.readBeamMesh.setColorAt(i, _c)
+        } else {
+          parkBox(isl.readBeamMesh, i)
+          _c.setRGB(0, 0, 0)
+          isl.readBeamMesh.setColorAt(i, _c)
+        }
       }
+      isl.readBeamMesh.instanceMatrix.needsUpdate = true
+      isl.readBeamMesh.instanceColor!.needsUpdate = true
       isl.readerMesh.instanceColor!.needsUpdate = true
       isl.readerBarMesh.instanceMatrix.needsUpdate = true
       isl.readerBarMesh.instanceColor!.needsUpdate = true
@@ -1785,6 +1872,10 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       isl.mergeMesh.dispose()
       isl.mergeBarMesh.dispose()
       isl.mergeBeamMesh.dispose()
+      isl.readBeamMesh.dispose()
+      // The three index beams each own a CLONED material — the shared cache must
+      // not be mutated, so these are ours to release.
+      for (const beam of isl.indexBeams) (beam.material as THREE.Material).dispose()
       isl.queueMesh.dispose()
     }
   }

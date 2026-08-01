@@ -213,10 +213,15 @@ export const LOCAL = {
   sortTable: [-30, 0, -78],
   /** The compressor and the column writers. */
   columnWriters: [30, 0, -78],
-  /** primary.cidx — the sparse primary index, one entry per granule. */
-  primaryIndex: [-104, 0, -6],
-  /** skp_idx_*.idx2 — the secondary (data skipping) indexes. */
-  skipIndexes: [-104, 0, 44],
+  /**
+   * `primary.cidx` — the west end of the yard, ONE RACK PER TABLE BAND. The
+   * z here is only the strip's reference line; the band's own z comes from
+   * `indexGateAt`, because the index is a property of the DATA and not a
+   * building the data visits. See that function for why it moved.
+   */
+  primaryIndex: [-104, 0, 0],
+  /** skp_idx_*.idx2 — between its table's primary rack and its table's band. */
+  skipIndexes: [-82, 0, 0],
   /** The mark cache and the uncompressed cache, on one deck. */
   cacheDeck: [0, CITY.cacheDeck.y, -52],
   markCache: [-26, CITY.cacheDeck.y, -52],
@@ -362,6 +367,27 @@ export function partPlaceLocal(
   return [x, CITY.yard.baseY, partLaneZ(table, lane)]
 }
 
+/**
+ * The index racks, ONE PER TABLE BAND, at the west end of that band.
+ *
+ * They used to be two lone towers in the middle of the west strip, one per node,
+ * with the whole read path detouring to them — which drew the primary index as
+ * a building the query walks to, shared by every table. It is neither. In
+ * ClickHouse `primary.cidx` is a file inside EVERY PART, loaded lazily into that
+ * part's own memory (`IMergeTreeDataPart::index`), and the search runs once per
+ * part, in parallel, over the parts of ONE table. So the honest place for it is
+ * beside its own table's parts: three racks per island, each answering only for
+ * the band it stands at, and the doc says the file is per part.
+ */
+export function indexGateAt(node: number, table: number): [number, number, number] {
+  return nodeLocal(node, LOCAL.primaryIndex[0], 0, bandZLocal(table))
+}
+
+/** The skip-index plates for one table, between its rack and its band. */
+export function skipGateAt(node: number, table: number): [number, number, number] {
+  return nodeLocal(node, LOCAL.skipIndexes[0], 0, bandZLocal(table))
+}
+
 /** Node-local z of table `table`'s band centre line. */
 export function bandZLocal(table: number): number {
   return (table - (N_TABLES - 1) / 2) * CITY.yard.bandPitch
@@ -379,6 +405,27 @@ export function mergeSlotLocal(i: number): [number, number, number] {
   const step = 26
   const x = -((N_MERGE_SLOTS - 1) * step) / 2 + i * step
   return [x, 15, LOCAL.mergeGantry[2]]
+}
+
+/**
+ * The `system.distribution_queue` silos: ONE PER DESTINATION SHARD, because the
+ * real directory tree is one per destination — `data/<db>/<table>/shard1_…`,
+ * `shard2_…` — and a block waiting in one of them is waiting for that shard and
+ * no other. Which is why the ducts fork before they arrive rather than after.
+ */
+export const SPOOL_SILO = {
+  /** Centre-to-centre. 15 against a radius of 5 leaves a duct's width between them. */
+  spacing: 15,
+  radius: 5,
+  height: 15,
+  /** Plinth top. */
+  baseY: 2.4,
+} as const
+
+/** World position of the floor centre of node `n`'s queue silo for shard `s`. */
+export function spoolSiloAt(node: number, shard: number): [number, number, number] {
+  const a = anchorAt(node, 'insertSpool')
+  return [a[0] + (shard - (N_SHARDS - 1) / 2) * SPOOL_SILO.spacing, a[1], a[2]]
 }
 
 /** Node-local position of replication-queue slot `i`. */
@@ -861,25 +908,45 @@ export const rid = {
   /**
    * The background-insert path. With `distributed_foreground_insert = 0` a
    * remote shard's slice is not sent: it is PARKED in the initiator's own
-   * `system.distribution_queue` directory (`distToSpool`), and a background
-   * thread later flushes it over the wire into the underlying MergeTree table
-   * of one live replica of the target shard (`spoolFlush`). The receiving
-   * server's `Distributed` table is not involved in either. There is no
-   * queue→own-dock route on purpose: the initiator's own shard never enters
-   * the queue (`prefer_localhost_replica` writes it synchronously), and a
-   * remote shard's queue cannot flush to this server.
+   * `system.distribution_queue` directory, and a background thread later
+   * flushes it over the wire into the underlying MergeTree table of one live
+   * replica of the target shard (`spoolFlush`). The receiving server's
+   * `Distributed` table is not involved in either. There is no queue→own-dock
+   * route on purpose: the initiator's own shard never enters the queue
+   * (`prefer_localhost_replica` writes it synchronously), and a remote shard's
+   * queue cannot flush to this server.
+   *
+   * The parking path is TWO legs, because the sharding expression is a step and
+   * not a label: the whole block goes `Distributed` → the hash wheel
+   * (`distToWheel`), and what leaves the wheel is a per-destination slice
+   * (`wheelToSpool`), one duct to each shard's silo. A single door→queue duct
+   * bypassing the wheel drew the queue as the thing that decides where rows go.
+   * It is not. The wheel decides; the queue only holds what was decided.
    */
-  distToSpool: (node: number) => `node.spool.${node}`,
+  distToWheel: (node: number) => `node.shardkey.${node}`,
+  wheelToSpool: (node: number, shard: number) => `node.spool.${node}.${shard}`,
   spoolFlush: (from: number, to: number) => `spool.flush.${from}.${to}`,
   /** inside one node: the write path */
   distToDock: (node: number) => `node.split.${node}`,
   sortBlock: (node: number) => `node.sort.${node}`,
   writeColumns: (node: number) => `node.write.${node}`,
-  commitPart: (node: number) => `node.commit.${node}`,
+  /**
+   * ONE PER TABLE. The rename that commits a part puts it in `system.parts` for
+   * a particular table, and the tower it becomes stands in that table's band —
+   * so a single duct into "the yard" was a claim the yard does not make. With
+   * one duct per band you can watch which table is actually being written.
+   */
+  commitPart: (node: number, table: number) => `node.commit.${node}.${table}`,
   /** inside one node: the read path */
-  probeIndex: (node: number) => `node.probe.${node}`,
-  probeSkip: (node: number) => `node.skip.${node}`,
-  markToPool: (node: number) => `node.marks.${node}`,
+  /**
+   * The analysis legs are PER TABLE, because the index is per table's parts and
+   * a statement names one table. One duct per node meant a query on `sessions`
+   * lit the same tube as a query on `hits`, and the tube ended at a building
+   * that stood for all three at once.
+   */
+  probeIndex: (node: number, table: number) => `node.probe.${node}.${table}`,
+  probeSkip: (node: number, table: number) => `node.skip.${node}.${table}`,
+  markToPool: (node: number, table: number) => `node.marks.${node}.${table}`,
   poolToReader: (node: number, thread: number) => `node.reader.${node}.${thread}`,
   readerToResult: (node: number) => `node.result.${node}`,
   /** inside one node: merges, TTL, volumes */
@@ -1048,7 +1115,10 @@ for (let from = 0; from < N_NODES; from++) {
      * No road of its own: in background mode (the default) the constant
      * traffic makes the path evident, and a second static line from the spool
      * would draw the six-pair arc diagram twice. */
-    const spoolA = anchorAt(from, 'insertSpool')
+    /* Out of the silo that actually holds it: the one for the DESTINATION
+     * shard. Leaving from the centre of the pair drew a queue with one drain,
+     * which is the thing the per-destination directories are not. */
+    const spoolA = spoolSiloAt(from, shardOf(to))
     route(
       rid.spoolFlush(from, to),
       [
@@ -1111,51 +1181,103 @@ for (let n = 0; n < N_NODES; n++) {
   const volEnd: RouteEnd = { label: `${host} · storage volumes`, id: `node.${n}.volumes` }
   const door = anchorAt(n, 'distTable')
 
-  /* Distributed → the real table's dock. This is the leg that makes the SPLIT
-   * visible: one pod comes up the client corridor into the Distributed table,
-   * and per-shard slices leave it — this one down to the local table, the
-   * other over the wire to the other shard (`fan.insert.*`). Without it the
-   * incoming freight vanished at the door and parts appeared from nowhere. */
+  /* THE SPLIT, in three pieces of duct: the whole block goes door → wheel, and
+   * what leaves the wheel is one slice per destination — down to this server's
+   * own dock, or into the queue silo of the shard that owns it. One pod in, two
+   * pods out, and the difference in their bulk is the sharding key doing its
+   * job. Drawing the door as the fork instead put the decision in the table and
+   * left the wheel as scenery; drawing no fork at all made the incoming freight
+   * vanish at the door and parts appear from nowhere. */
+  const wheelAt = anchorAt(n, 'shardWheel')
+  /* Overhead, in one clear bow ABOVE the wheel (its ring sits at y ≈ 8–10),
+   * ending just over the hub lamp rather than running through it at plinth
+   * height: down there the duct was unreadable and could not be clicked,
+   * because the wheel and the silos swallowed every ray before it reached the
+   * tube. Every leg of the split starts or ends at this one point, so the fork
+   * is a fork and not three ducts that happen to pass near each other. */
+  const wheelTop: [number, number, number] = [wheelAt[0], 12.5, wheelAt[2]]
+  const wheelEnd: RouteEnd = { label: `${host} · sharding key`, id: `node.${n}.wheel` }
+  /* The split runs ELEVATED — a gantry above the strip, not a line along it.
+   * At plinth height these three ducts crossed the wheel's plate, the silos and
+   * the cluster board, and every one of those surfaces is lighter than a duct
+   * at 0.12: from anywhere but straight overhead the path simply was not there.
+   * Held at SPLIT_Y with only short vertical stubs into the wheel and the silo
+   * caps, it reads as pipework against the sky. */
+  const SPLIT_Y = 25
+  /* Four times the network's usual 0.13. These three are the only ducts in the
+   * city that carry the whole INSERT story in one span, and at road opacity
+   * they read as haze against a daylit plate — the tube has to be the thing
+   * you follow, not something you notice once you already know it is there. */
+  const SPLIT_OPACITY = 0.55
+
+  route(
+    rid.distToWheel(n),
+    [
+      [door[0] - 10, 9, door[2] - 1],
+      [door[0] - 15, SPLIT_Y - 4, door[2] - 1],
+      [(door[0] + wheelAt[0]) / 2, SPLIT_Y, door[2] - 1],
+      [wheelAt[0] + 5, SPLIT_Y - 3, wheelAt[2]],
+      wheelTop,
+    ],
+    {
+      what: 'a whole INSERT block, on its way to be cut up',
+      from: { label: `${host} · Distributed`, id: `node.${n}.dist` },
+      to: wheelEnd,
+      note: `The block is still whole here. \`Distributed(cluster, db, table, key)\` evaluates the sharding key per ROW, takes it modulo the shard weights, and the block leaves this wheel cut into one slice per destination — which is why the duct in does not fork and the ducts out do.`,
+    },
+    { color: COLOR.client, speed: 90, size: 1.2, visible: true, roadOpacity: SPLIT_OPACITY },
+  )
+
   route(
     rid.distToDock(n),
     [
-      [door[0] - 2, 4, door[2] - 4],
-      [(door[0] + dock[0]) / 2, 6, (door[2] + dock[2]) / 2],
+      wheelTop,
+      [wheelAt[0] + 8, 15, wheelAt[2] + 3],
+      [(wheelAt[0] + dock[0]) / 2, 12, (wheelAt[2] + dock[2]) / 2 - 4],
+      [dock[0] - 12, 8, dock[2] - 7],
       [dock[0], 6, dock[2] - 4],
     ],
     {
-      what: "one shard's slice of an INSERT block",
-      from: { label: `${host} · Distributed`, id: `node.${n}.dist` },
+      what: "the slice for this server's own shard",
+      from: wheelEnd,
       to: dockEnd,
-      note: `The Distributed table evaluated the sharding expression, and these are the rows that belong to this server's own shard — they go straight down to the local table, with no network hop at all. That short-cut is \`prefer_localhost_replica\`, and it is on by default.`,
+      note: `These are the rows the sharding key sent to this server's OWN shard. They never enter the queue and never cross the network: they go straight down into the local table, synchronously, even when the rest of the block is being deferred. That short-cut is \`prefer_localhost_replica\`, and it is on by default.`,
     },
-    { color: COLOR.client, speed: 95, size: 1.2, visible: true, roadOpacity: 0.12 },
+    { color: COLOR.client, speed: 95, size: 1.2, visible: true, roadOpacity: SPLIT_OPACITY },
   )
 
-  /* Distributed → the queue. The OTHER shard's slice, in background mode: it
-   * is not sent anywhere yet, it is written to this server's own disk under
-   * `data/<database>/<table>/` — the directory `system.distribution_queue`
-   * reports on — and the ok goes back to the client while it sits here. */
-  const spoolAt = anchorAt(n, 'insertSpool')
-  /* Overhead, in one clear bow ABOVE the sharding wheel (its ring sits at
-   * y ≈ 8–10), not along the ground through it: a duct at plinth height was
-   * unreadable there and could not be clicked, because the wheel and the
-   * silos swallowed every ray before it reached the tube. */
-  route(
-    rid.distToSpool(n),
-    [
-      [door[0] - 14, 8, door[2]],
-      [(door[0] + spoolAt[0]) / 2, 19, door[2] + 1],
-      [spoolAt[0] + 10, 9, spoolAt[2]],
-    ],
-    {
-      what: "a slice parked in the initiator's own queue",
-      from: { label: `${host} · Distributed`, id: `node.${n}.dist` },
-      to: { label: `${host} · system.distribution_queue`, id: `node.${n}.spool` },
-      note: `With \`distributed_foreground_insert = 0\` — the default — a slice bound for another shard is not sent now. It becomes a .bin file on THIS server's disk, the client is told ok, and a background thread flushes it later. Until that flush lands, no shard has this data.`,
-    },
-    { color: COLOR.client, speed: 90, size: 1.2, visible: true, roadOpacity: 0.12 },
-  )
+  /* One duct per destination shard, because there is one DIRECTORY per
+   * destination shard — `data/<database>/<table>/shard1_…`, `shard2_…` — and
+   * one silo already stands for each. The duct into this server's OWN shard's
+   * silo is drawn and stays empty for the whole run, which is the visible form
+   * of `prefer_localhost_replica`: that slice is written locally and
+   * synchronously, so nothing is ever queued for it. */
+  for (let s = 0; s < N_SHARDS; s++) {
+    const silo = spoolSiloAt(n, s)
+    const capY = SPOOL_SILO.baseY + SPOOL_SILO.height
+    /* The two ducts run the same 45–60 units west along the same strip, so
+     * they are separated in z rather than in height — one bowing to the plate's
+     * north edge, one to its south. Stacked vertically instead, the near duct
+     * hid the far one from every camera angle the strip is ever viewed from. */
+    const zBow = wheelAt[2] + (s % 2 === 0 ? -7 : 9)
+    route(
+      rid.wheelToSpool(n, s),
+      [
+        wheelTop,
+        [wheelAt[0] - 10, SPLIT_Y - 2, zBow],
+        [(wheelAt[0] + silo[0]) / 2, SPLIT_Y, zBow],
+        [silo[0] + 9, SPLIT_Y - 2, silo[2]],
+        [silo[0], capY + 1.2, silo[2]],
+      ],
+      {
+        what: `a slice for shard ${s + 1}, parked in the initiator's own queue`,
+        from: wheelEnd,
+        to: { label: `${host} · system.distribution_queue`, id: `node.${n}.spool` },
+        note: `With \`distributed_foreground_insert = 0\` — the default — a slice bound for another shard is not sent now. It becomes a .bin file on THIS server's disk, under the directory for shard ${s + 1} and no other, the client is told ok, and a background thread flushes it later. Until that flush lands, no shard has this data.`,
+      },
+      { color: COLOR.client, speed: 90, size: 1.2, visible: true, roadOpacity: SPLIT_OPACITY },
+    )
+  }
 
   route(
     rid.sortBlock(n),
@@ -1196,22 +1318,38 @@ for (let n = 0; n < N_NODES; n++) {
    * the writers and the yard (the cache deck plate is at y ≈ 9), because a
    * ground-level shortcut reads as a road through buildings it has nothing to
    * do with. */
-  route(
-    rid.commitPart(n),
-    [
-      [writers[0], 7, writers[2] + 3],
-      [(writers[0] + yard[0]) / 2 + 6, 20, (writers[2] + yard[2]) / 2],
-      [yard[0] + 6, 12, yard[2] - 22],
-      [yard[0], 5, yard[2] - 12],
-    ],
-    {
-      what: 'a finished part being committed',
-      from: { label: `${host} · column writers`, id: `node.${n}.insertdock` },
-      to: yardEnd,
-      note: 'The directory was written under a `tmp_insert_` name and is renamed into place here. That rename is the commit: the part becomes visible as a unit, and no query ever sees half of it.',
-    },
-    { color: COLOR.partActive, speed: 90, size: 1.3, visible: true, roadOpacity: 0.12 },
-  )
+  /* One duct per TABLE, ending over that table's own band at the level-0 lane —
+   * the exact strip of ground where the tower is about to appear. A single duct
+   * into the middle of the yard left the towers arriving from nowhere: you saw
+   * a pod reach "the yard", and then a level-0 part stood up in a band the pod
+   * had never pointed at. Held high and at COMMIT_OPACITY for the same reason
+   * the split ducts are: this is the last leg of the INSERT and it has to be
+   * followable across the whole island. */
+  const COMMIT_Y = 26
+  const COMMIT_OPACITY = 0.5
+  for (let t = 0; t < N_TABLES; t++) {
+    const laneZ = nodeLocal(n, 0, 0, partLaneZ(t, 0))[2]
+    // Its own lane in x on the way over, so three ducts crossing the same
+    // island read as three and not as one thick one.
+    const xLane = yard[0] + (t - (N_TABLES - 1) / 2) * 15
+    route(
+      rid.commitPart(n, t),
+      [
+        [writers[0], 7, writers[2] + 3],
+        [writers[0] - 3, COMMIT_Y - 6, writers[2] + 12],
+        [xLane, COMMIT_Y, (writers[2] + laneZ) / 2],
+        [xLane, COMMIT_Y - 5, laneZ - 16],
+        [yard[0], CITY.yard.baseY + 4.5, laneZ - 4.5],
+      ],
+      {
+        what: `a finished part being committed into ${TABLES[t].name}`,
+        from: { label: `${host} · column writers`, id: `node.${n}.insertdock` },
+        to: yardEnd,
+        note: `The directory was written under a \`tmp_insert_\` name and is renamed into place here. That rename is the commit: the part becomes visible as a unit, and no query ever sees half of it. It lands in \`${TABLES[t].name}\`'s band at level 0 — every part in that front lane arrived exactly this way.`,
+      },
+      { color: COLOR.partActive, speed: 90, size: 1.3, visible: true, roadOpacity: COMMIT_OPACITY },
+    )
+  }
 
   route(
     rid.toHotVolume(n),
@@ -1261,64 +1399,84 @@ for (let n = 0; n < N_NODES; n++) {
 
 for (let n = 0; n < N_NODES; n++) {
   const disp = anchorAt(n, 'readPoolDispatcher')
-  const pk = anchorAt(n, 'primaryIndex')
-  const skip = anchorAt(n, 'skipIndexes')
   const mc = anchorAt(n, 'markCache')
   const yard = anchorAt(n, 'partsYard')
   const pool = anchorAt(n, 'readPool')
   const host = nodeHost(n)
   const poolEnd: RouteEnd = { label: `${host} · read pool`, id: `node.${n}.readpool` }
 
-  route(
-    rid.probeIndex(n),
-    [
-      [disp[0], 8, disp[2]],
-      [30, 20, -68],
-      [pk[0] + 14, 18, pk[2] - 12],
-      [pk[0], 12, pk[2]],
-    ],
-    {
-      what: 'a query probing the primary index',
-      from: poolEnd,
-      to: { label: `${host} · primary.cidx`, id: `node.${n}.primaryindex` },
-      note: 'A binary search over one sorting-key row per granule, in RAM. It does not find rows — it finds the MARK RANGES that could contain them, and everything outside those ranges is never opened.',
-    },
-    { color: COLOR.primaryIndex, speed: 170, size: 1.0, visible: true, roadOpacity: 0.1 },
-  )
+  /* THE ANALYSIS LEGS, ONE SET PER TABLE.
+   *
+   * Every point below goes through `anchorAt`/`nodeLocal`. The previous version
+   * had raw `[30, 20, -68]`, `[-40, 14, -20]` and `[30, 12, -46]` in the middle
+   * of these curves — node-LOCAL numbers used as WORLD ones — so on every island
+   * but the (nonexistent) one at world origin the duct left the plate, crossed
+   * open ground towards x = 0 and came back. That is the "просто ужас": not the
+   * idea, the arithmetic.
+   *
+   * Held at READ_Y over the cache deck (its plate is at y ≈ 9) so the long haul
+   * from the pool to the west end reads as pipework and not as a road through
+   * the yard. */
+  const READ_Y = 24
+  for (let t = 0; t < N_TABLES; t++) {
+    const gate = indexGateAt(n, t)
+    const skipG = skipGateAt(n, t)
+    const tbl = TABLES[t].name
+    const pkEnd: RouteEnd = { label: `${host} · ${tbl} · primary.cidx`, id: `node.${n}.primaryindex` }
+    const skEnd: RouteEnd = { label: `${host} · ${tbl} · skip indexes`, id: `node.${n}.skipindexes` }
 
-  route(
-    rid.probeSkip(n),
-    [
-      [pk[0], 10, pk[2] + 6],
-      [pk[0] - 4, 8, (pk[2] + skip[2]) / 2],
-      [skip[0], 7, skip[2]],
-    ],
-    {
-      what: 'mark ranges being narrowed by a skip index',
-      from: { label: `${host} · primary.cidx`, id: `node.${n}.primaryindex` },
-      to: { label: `${host} · skip indexes`, id: `node.${n}.skipindexes` },
-      note: 'The primary index chose the ranges; `skp_idx_*.idx2` now throws away granules INSIDE them, using the min/max or the set it holds per granule group. A skip index can only ever remove work, never add rows.',
-    },
-    { color: COLOR.skipIndex, speed: 140, size: 0.95 },
-  )
+    route(
+      rid.probeIndex(n, t),
+      [
+        [disp[0], 8, disp[2]],
+        nodeLocal(n, 74, READ_Y, -66),
+        nodeLocal(n, 0, READ_Y, bandZLocal(t) - 34),
+        nodeLocal(n, -86, READ_Y - 8, bandZLocal(t) - 10),
+        [gate[0], 13, gate[2]],
+      ],
+      {
+        what: `a query looking for granules in ${tbl}`,
+        from: poolEnd,
+        to: pkEnd,
+        note: `Once per PART of ${tbl}, in parallel, and never once for the table: each part carries its own \`primary.cidx\` with one sorting-key row per granule. What comes back is MARK RANGES — \`[begin × index_granularity, end × index_granularity)\` inside that one part — and a range in one part has nothing to do with the same numbers in another. Only a predicate that is one continuous key interval gets a true binary search; anything with \`IN\` or \`OR\` gets a coarse recursive exclusion search instead, which is why those leave many disjoint ranges behind.`,
+      },
+      { color: COLOR.primaryIndex, speed: 170, size: 1.0, visible: true, roadOpacity: 0.3 },
+    )
 
-  route(
-    rid.markToPool(n),
-    [
-      [skip[0] + 6, 8, skip[2] - 4],
-      [-40, 14, -20],
-      [mc[0], mc[1], mc[2]],
-      [30, 12, -46],
-      [disp[0] - 6, 8, disp[2] + 4],
-    ],
-    {
-      what: 'a mark lookup, and the offsets coming back',
-      from: { label: `${host} · skip indexes`, id: `node.${n}.skipindexes` },
-      to: poolEnd,
-      note: 'A mark is the `.mrk3` entry that says where a granule starts in the compressed `.bin` and where inside the decompressed block. Resolving it from the mark cache costs nothing; a miss costs a disk read before the read has even begun.',
-    },
-    { color: COLOR.markCache, speed: 160, size: 0.9 },
-  )
+    route(
+      rid.probeSkip(n, t),
+      [
+        [gate[0] + 3, 11, gate[2] - 3],
+        [(gate[0] + skipG[0]) / 2, 15, gate[2] - 6],
+        [skipG[0], 10, skipG[2]],
+      ],
+      {
+        what: `mark ranges being narrowed inside ${tbl}'s parts`,
+        from: pkEnd,
+        to: skEnd,
+        note: `The primary index chose the ranges; \`skp_idx_*.idx2\` now throws granules away INSIDE them. Its unit is its own \`GRANULARITY n\` — n data granules per index granule — so the ranges are mapped into index-mark space, filtered, and expanded back. A part the primary index already emptied is never consulted, and a part missing the index file is passed through untouched. A skip index can only ever remove work, never add rows.`,
+      },
+      { color: COLOR.skipIndex, speed: 140, size: 0.95, visible: true, roadOpacity: 0.26 },
+    )
+
+    route(
+      rid.markToPool(n, t),
+      [
+        [skipG[0] + 3, 10, skipG[2] + 3],
+        nodeLocal(n, -60, 17, bandZLocal(t) + 8),
+        [mc[0], mc[1] + 4, mc[2] + 4],
+        nodeLocal(n, 70, 14, -62),
+        [disp[0] - 6, 8, disp[2] + 4],
+      ],
+      {
+        what: 'the surviving ranges, and the marks that locate them',
+        from: skEnd,
+        to: poolEnd,
+        note: 'What reaches the pool is a list of (part, mark ranges) — the work the query has left after both indexes. A mark is the `.mrk3` entry holding the offset of the granule in the compressed `.bin` and the offset inside the decompressed block; the mark cache holds whole marks FILES, per part and stream, so a miss costs a disk read before the read has even begun. Adjacent ranges closer together than `merge_tree_min_rows_for_seek` were already coalesced here, so a few of the granules on their way in were never matched at all — seeking past them was not worth it.',
+      },
+      { color: COLOR.markCache, speed: 160, size: 0.9 },
+    )
+  }
 
   for (let th = 0; th < N_READ_THREADS; th++) {
     const bay = nodeLocal(n, readerBayLocal(th)[0], 0, readerBayLocal(th)[2])

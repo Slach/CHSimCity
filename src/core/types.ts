@@ -341,6 +341,14 @@ export interface PartSim {
   /** `marks_count` = ceil(rows / index_granularity) + 1. */
   marks: number
   state: PartState
+  /**
+   * The INSERT that wrote this part is being drawn end to end, so its commit
+   * pod is already paid for. `undefined` means the part came from somewhere
+   * with no journey behind it — a merge, a mutation — and its commit pod is
+   * budgeted like any other traffic. Not a ClickHouse column: this is the
+   * simulation telling the presentation which freight it has promised to draw.
+   */
+  traced?: boolean
   /** Which storage volume the part lives on. 0 = hot, 1 = cold. */
   volume: number
   /** Simulated time this part was created. */
@@ -445,11 +453,19 @@ export type ReaderState = 'idle' | 'seeking' | 'reading' | 'decompressing' | 'fi
 export interface ReaderSim {
   slot: number
   state: ReaderState
+  /** Which table the task belongs to. A mark range means nothing without it. */
+  table: number
   /** Which part this thread is currently reading, by slot. -1 = none. */
   part: number
-  /** Mark range handed out by the pool: [begin, end). */
+  /**
+   * Mark range handed out by the pool: [begin, end). The numbers are LOCAL TO
+   * THAT PART — mark 100 of one part has nothing to do with mark 100 of
+   * another — which is why `part` and `table` travel with them.
+   */
   markBegin: number
   markEnd: number
+  /** Marks in the whole part, so the range can be drawn as a fraction of it. */
+  marksInPart: number
   /** Marks consumed so far inside the range. */
   marksDone: number
   /** Which column of the part this thread is on. */

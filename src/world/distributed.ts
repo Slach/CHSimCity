@@ -3,7 +3,7 @@ import { COLOR } from '../core/theme'
 import { N_NODES, N_SHARDS } from '../core/types'
 import type { SimState, WorldFactory, WorldModule } from '../core/types'
 import { clamp01, damp, fmtBytes, fmtNum } from '../core/util'
-import { anchorAt, nodeHost, shardOf } from './layout'
+import { SPOOL_SILO, anchorAt, nodeHost, shardOf, spoolSiloAt } from './layout'
 
 /* ============================================================================
  * THE DISTRIBUTED TABLE — ONE ON EVERY SERVER
@@ -49,7 +49,7 @@ const WHEEL_SEGMENTS = 48
  * at -86. A radius over 9 either overhangs the plate or reaches into the dock.
  */
 const WHEEL_RADIUS = 9
-const SILO_H = 15
+const SILO_H = SPOOL_SILO.height
 /** Same arithmetic: -105 .. -89, meeting the plate edge and clearing the dock. */
 const PLINTH_DEPTH = 16
 
@@ -187,10 +187,12 @@ export const createDistributed: WorldFactory = (ctx): WorldModule => {
     const siloFill: THREE.Mesh[] = []
     const siloShells: THREE.Mesh[] = []
     for (let s = 0; s < N_SHARDS; s++) {
-      const x = spoolAt[0] + (s - (N_SHARDS - 1) / 2) * 15
+      // Position and size come from layout.ts, not from here: the ducts out of
+      // the hash wheel have to arrive at the cap of this exact cylinder.
+      const x = spoolSiloAt(n, s)[0]
       const shell = new THREE.Mesh(unitCyl, matGlass)
-      shell.position.set(x, 2.4 + SILO_H / 2, spoolAt[2])
-      shell.scale.set(10, SILO_H, 10)
+      shell.position.set(x, SPOOL_SILO.baseY + SILO_H / 2, spoolAt[2])
+      shell.scale.set(SPOOL_SILO.radius * 2, SILO_H, SPOOL_SILO.radius * 2)
       group.add(shell)
       siloShells.push(shell)
 

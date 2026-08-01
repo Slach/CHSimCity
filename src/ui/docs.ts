@@ -628,20 +628,30 @@ Compact versus Wide part format is described but not drawn. \`min_rows_for_wide_
     tldr: 'It cannot find a row. It can only tell you which granule a row must be in.',
     sections: [
       {
-        heading: 'Sparse, and deliberately so',
-        body: `The tower is drawn as a stack of equal steps because that is exactly what this index is: one entry per \`index_granularity\` rows — ${GRAN} by default — holding the sorting-key values of that granule's first row.
+        heading: 'One per PART, and there are three racks for that reason',
+        body: `There is no table-level primary index. \`primary.cidx\` is a file **inside every part directory**, loaded into that part's own memory and kept there for as long as the part exists; the search runs once per part, in parallel across parts, and the mark ranges it returns are numbered inside that one part. Mark 4181 of one part has nothing to do with mark 4181 of another.
 
-A billion-row part therefore has about 122,000 index entries, not a billion. The whole index is small enough to be loaded into memory when the table is attached and to **stay** there for the life of the server. That is the trade: it is tiny and always resident, and in exchange it cannot identify a row.`,
+CHSimCity draws one rack at the west end of each table's band — three per server — because a query names one table and consults the index of every part of it. Even that is a simplification: strictly there would be one small index per tower in the yard. What must not be simplified away is that the index belongs to the DATA, not to the server.`,
+      },
+      {
+        heading: 'Sparse, and deliberately so',
+        body: `Each rack is drawn as a stack of equal steps because that is exactly what this index is: one entry per \`index_granularity\` rows — ${GRAN} by default — holding the sorting-key values of that granule's first row.
+
+A billion-row part therefore has about 122,000 index entries, not a billion. Small enough to load when the part is attached and to **stay** resident. That is the trade: tiny and always there, and in exchange it cannot identify a row. (With \`index_granularity_bytes\` on — the default — granules do not all hold the same number of rows, which is why every mark carries its own row count and why row arithmetic goes through the granularity table rather than a multiplication.)`,
       },
       {
         heading: 'What a query actually does with it',
         body: `\`WHERE CounterID = 57\` on a table ordered by \`(CounterID, EventDate, …)\`:
 
-1. Binary-search the index for the first granule whose key could contain 57, and the last.
-2. That is a **mark range**: granules 4181 through 4184, say.
+1. Binary-search that PART's index for the first granule whose key could contain 57, and the last.
+2. That is a **mark range**: granules 4181 through 4184, say — \`[begin × index_granularity, end × index_granularity)\`.
 3. Read those four granules — ${GRAN} rows each — and filter the ~32,000 rows down to the matching ones.
 
-The beam on the tower lights while a query is doing this, and its height is where in the key space the search landed.`,
+Step 1 is a true binary search only when the predicate is ONE continuous key interval. \`IN (…)\`, \`OR\`, or a tuple comparison takes the other path: a coarse recursive exclusion search that splits each candidate range into \`merge_tree_coarse_index_granularity\` pieces (8 by default) and throws away the ones the key cannot be in — which is why those predicates leave many disjoint ranges behind rather than one.
+
+Ranges closer together than \`merge_tree_min_rows_for_seek\` are then merged, so some granules are read that never matched: skipping them would have cost more than reading them.
+
+The beam on the rack lights while a query on THAT table is doing this, and its height is where in the key space the search landed.`,
       },
       {
         heading: 'It only works on a key PREFIX',

@@ -320,7 +320,9 @@ export function createSim(bus: Bus): SimApi {
     return {
       slot,
       state: 'idle',
+      table: 0,
       part: -1,
+      marksInPart: 0,
       markBegin: 0,
       markEnd: 0,
       marksDone: 0,
@@ -572,6 +574,47 @@ export function createSim(bus: Bus): SimApi {
     bus.emit('flow', req)
   }
 
+  /**
+   * An INSERT is drawn END TO END, or not drawn at all.
+   *
+   * `flow` spends a token per emission, first come first served, and that is
+   * right for traffic whose pods are independent of each other — a merge, a
+   * fetch, a reader capillary. It is exactly wrong for a statement, because a
+   * statement's legs are emitted in ORDER over several seconds: the corridor
+   * pod goes first and pays, and the legs behind it — the wheel, the queue, the
+   * dock, the sort, the commit — are the ones that find the budget empty. Turn
+   * `insertsPerSec` up to 200 and the result is not "fewer pods": it is freight
+   * arriving at the `Distributed` table and NOTHING leaving, then towers
+   * appearing in the yard that nothing was seen to deliver. The city says the
+   * data was lost. The data was not lost; the drawing ran out of budget.
+   *
+   * So the whole journey is reserved at the door, once. What the city shows at
+   * a rate it cannot draw is a SAMPLE of statements, each one complete — which
+   * is the honest reduction, and the only one that leaves every arrow in the
+   * INSERT path meaning what it says.
+   */
+  const TRACE_COST = 9
+
+  /** Claim one statement's whole journey, or decline to draw it at all. */
+  function beginTrace(): boolean {
+    if (quiet) return false
+    if (flowTokens < TRACE_COST) return false
+    flowTokens -= TRACE_COST
+    return true
+  }
+
+  /**
+   * One leg of an already-reserved journey. It does NOT consult the budget:
+   * paying twice is what made the tail of a statement disappear.
+   */
+  function leg(traced: boolean, route: string, count: number, kind: FlowKind, size?: number, stagger?: number): void {
+    if (!traced || quiet) return
+    const req: FlowRequest = { route, count, kind }
+    if (size !== undefined) req.size = size
+    if (stagger !== undefined) req.stagger = stagger
+    bus.emit('flow', req)
+  }
+
   function toast(text: string, kind: 'info' | 'warn' | 'good' = 'info', ms = 4200): void {
     if (quiet) return
     bus.emit('toast', { text, kind, ms })
@@ -613,7 +656,7 @@ export function createSim(bus: Bus): SimApi {
     maxBlock: number,
     level: number,
     rows: number,
-    opts: { fetched?: boolean; mutation?: number; volume?: number; ttlBase?: number } = {},
+    opts: { fetched?: boolean; mutation?: number; volume?: number; ttlBase?: number; traced?: boolean } = {},
   ): PartSim | null {
     const nt = nodes[node].tables[table]
     // -1 is not a failure: the part exists and is simulated, it just has no
@@ -641,6 +684,10 @@ export function createSim(bus: Bus): SimApi {
       // A brand-new part is written under `tmp_insert_…` and is invisible; a
       // fetched part arrives already complete and only needs committing.
       state: opts.fetched ? 'preactive' : 'temporary',
+      /* Whether this part's commit is part of a journey already being drawn.
+       * Undefined means "not part of one" — a merge output, a mutation result —
+       * and those pay the ordinary budget for their commit pod. */
+      traced: opts.traced,
       volume: opts.volume ?? 0,
       createdAt: state.t,
       stateSince: state.t,
@@ -727,7 +774,11 @@ export function createSim(bus: Bus): SimApi {
             // The columns are still being compressed into `tmp_insert_…`.
             if (age >= TEMPORARY_SECONDS) {
               setPartState(node, t, p, 'preactive')
-              flow(rid.commitPart(node), 1, 'part_write', flowSize(p.rows))
+              /* Into the band of the table this part belongs to. A part is not
+               * committed to "the yard": `system.parts` has a row for THIS
+               * table, and the tower is about to stand in that table's band. */
+              if (p.traced === undefined) flow(rid.commitPart(node, t), 1, 'part_write', flowSize(p.rows))
+              else leg(p.traced, rid.commitPart(node, t), 1, 'part_write', flowSize(p.rows))
             }
             break
           case 'preactive':
@@ -846,7 +897,7 @@ export function createSim(bus: Bus): SimApi {
    * Write one block into one node. Returns the number of parts created, which is
    * the number the operator cares about and rarely predicts correctly.
    */
-  function writeBlock(node: number, table: number, rows: number): number {
+  function writeBlock(node: number, table: number, rows: number, traced: boolean): number {
     const n = nodes[node]
     if (n.status === 'down') return 0
 
@@ -884,11 +935,11 @@ export function createSim(bus: Bus): SimApi {
       return 0
     }
 
-    flow(rid.sortBlock(node), 1, 'block', flowSize(rows))
+    leg(traced, rid.sortBlock(node), 1, 'block', flowSize(rows))
     // The block is split across the column writers, so each pod carries a share
     // of it rather than the whole thing.
     const writers = Math.min(3, 1 + Math.floor(streams[table] / 8))
-    flow(rid.writeColumns(node), writers, 'part_write', flowSize(rows / writers), 0.12)
+    leg(traced, rid.writeColumns(node), writers, 'part_write', flowSize(rows / writers), 0.12)
 
     const nParts = splitByPartition(table, rows)
     const nt = n.tables[table]
@@ -900,7 +951,7 @@ export function createSim(bus: Bus): SimApi {
       // A brand-new part always has min_block == max_block and level 0. That
       // identity is what tells you, from a part name alone, that nothing has
       // merged it yet.
-      const part = createPart(node, table, p, block, block, 0, r)
+      const part = createPart(node, table, p, block, block, 0, r, { traced })
       if (!part) continue
       created++
       // `system.part_log`'s `NewPart`: a part this node wrote from an INSERT.
@@ -910,7 +961,7 @@ export function createSim(bus: Bus): SimApi {
       // Every part written on a replicated table becomes a `/log` entry, and the
       // sibling replica will fetch it. This is the whole of insert replication.
       if (replicated) appendKeeperLog(node, table, 'GET_PART', part.name)
-      flow(rid.toHotVolume(node), 1, 'part_write', flowSize(r))
+      leg(traced, rid.toHotVolume(node), 1, 'part_write', flowSize(r))
     }
 
     n.blocksWritten++
@@ -954,7 +1005,9 @@ export function createSim(bus: Bus): SimApi {
         const rows = Math.round(buf.rows[t])
         buf.rows[t] = 0
         buf.timer[t] = 0
-        writeBlock(node, t, rows)
+        // A flush is its own piece of freight: one part standing for however
+        // many statements the buffer swallowed, so it reserves its own journey.
+        writeBlock(node, t, rows, beginTrace())
       } else {
         held += bytes
       }
@@ -1118,12 +1171,13 @@ export function createSim(bus: Bus): SimApi {
       // One pod, as big as the batch. `insertBlockRows` is the knob the whole
       // "batch your inserts" lesson turns on, and this is where turning it down
       // becomes visible as a swarm of small pods instead of one large one.
-      flow(rid.clientToNode(init), 1, 'insert', flowSize(rows))
+      const traced = beginTrace()
+      leg(traced, rid.clientToNode(init), 1, 'insert', flowSize(rows))
       /* Nothing else happens yet. The block is IN FLIGHT: the split, the
        * server's counters and the ok all wait until the freight has visibly
        * reached the Distributed table — a pod that vanishes into the door
        * while its consequences started seconds ago teaches nothing. */
-      inFlight.push({ init, table, rows, due: state.t + CORRIDOR_S })
+      inFlight.push({ init, table, rows, due: state.t + CORRIDOR_S, traced })
     }
 
     // Statements whose freight has just reached the initiator's door.
@@ -1135,7 +1189,7 @@ export function createSim(bus: Bus): SimApi {
       // The server died while the statement was in flight: the connection died
       // with it, and what the client's retry policy does next is its business.
       if (nodes[st.init].status === 'down') continue
-      splitAtDistributed(st.init, st.table, st.rows)
+      splitAtDistributed(st.init, st.table, st.rows, st.traced)
     }
 
     // Forwarded blocks whose wire crossing has just ended. They arrive at the
@@ -1159,7 +1213,7 @@ export function createSim(bus: Bus): SimApi {
         quorumFailures++
         continue
       }
-      dockBlock(b.node, b.table, b.rows)
+      dockBlock(b.node, b.table, b.rows, b.traced)
     }
 
     // The background spool flush, per server. A server that is down flushes
@@ -1172,7 +1226,7 @@ export function createSim(bus: Bus): SimApi {
           const q = spool[n][s]
           while (q.length > 0 && q[0].due <= state.t) {
             const item = q[0]
-            if (!deliverToShard(n, s, item.table, item.rows, 'spool')) {
+            if (!deliverToShard(n, s, item.table, item.rows, 'spool', item.traced)) {
               /* The real queue NEVER drops a file. A failed send raises
                * `error_count` and the directory backs off exponentially —
                * `distributed_background_insert_sleep_time_ms` (100 ms) ×
@@ -1202,9 +1256,9 @@ export function createSim(bus: Bus): SimApi {
   /** Same idea for the server-to-server arcs; they vary by pair, this is the middle. */
   const WIRE_S = 2.6
   /** INSERT statements still visibly travelling the client corridor. */
-  const inFlight: { init: number; table: number; rows: number; due: number }[] = []
+  const inFlight: { init: number; table: number; rows: number; due: number; traced: boolean }[] = []
   /** Forwarded blocks still visibly crossing a server-to-server arc. */
-  const onWire: { node: number; shard: number; table: number; rows: number; due: number }[] = []
+  const onWire: { node: number; shard: number; table: number; rows: number; due: number; traced: boolean }[] = []
 
   /**
    * The block has reached the initiator's `Distributed` table: NOW the
@@ -1216,11 +1270,19 @@ export function createSim(bus: Bus): SimApi {
    * really is all the client waits for — except its OWN shard's slice, which
    * `prefer_localhost_replica` writes synchronously even then.
    */
-  function splitAtDistributed(init: number, table: number, rows: number): void {
+  function splitAtDistributed(init: number, table: number, rows: number, traced: boolean): void {
     const d = nodes[init].distributed
     const blockId = blockSeq++
     shardBlock(init, rows, blockId)
     d.activity = Math.min(1, d.activity + 0.3)
+
+    /* The whole block into the hash wheel, ONCE, at its full row count. Every
+     * slice that leaves does so from there — down to the local dock, or into
+     * the queue silo of the shard that owns it — so the difference in bulk
+     * between the one duct in and the two out IS the split, shown rather than
+     * stated. It is emitted before the loop for the same reason the wheel is
+     * one building: the expression is evaluated once, over the whole block. */
+    leg(traced, rid.distToWheel(init), 1, 'insert', flowSize(rows))
 
     for (let s = 0; s < N_SHARDS; s++) {
       const r = Math.round(shardRows[s])
@@ -1237,21 +1299,21 @@ export function createSim(bus: Bus): SimApi {
          * `distributed_foreground_insert = 0`. It never enters the queue —
          * only the slices bound for OTHER shards are deferred. A "background"
          * INSERT is therefore partly synchronous. */
-        deliverToShard(init, s, table, r, 'dist')
+        deliverToShard(init, s, table, r, 'dist', traced)
       } else {
         // Parked: a .bin file in `data/<database>/<table>/shard<N>_all_replicas/`
         // on the disk of the server the client reached — the directory that
         // `system.distribution_queue` reports — flushed by a background thread.
         d.pendingBlocks[s]++
         d.pendingBytes[s] += r * rowCompressed[table]
-        spool[init][s].push({ table, rows: r, due: state.t + 0.25 + rng() * 0.35 })
-        flow(rid.distToSpool(init), 1, 'insert', flowSize(r))
+        spool[init][s].push({ table, rows: r, due: state.t + 0.25 + rng() * 0.35, traced })
+        leg(traced, rid.wheelToSpool(init, s), 1, 'insert', flowSize(r))
       }
     }
     /* The INSERT's answer is an ok, not data: a short pod however large the
      * batch was. That asymmetry — freight up the corridor, a receipt back
      * down it — IS the lesson, so the size is a constant near the floor. */
-    flow(rid.nodeToClient(init), 1, 'result', 0.2)
+    leg(traced, rid.nodeToClient(init), 1, 'result', 0.2)
   }
 
   /**
@@ -1262,15 +1324,17 @@ export function createSim(bus: Bus): SimApi {
    * the sender inserted into the underlying MergeTree table directly and the
    * receiving server's Distributed table never saw it.
    */
-  function landBlock(node: number, table: number, rows: number): void {
-    flow(rid.distToDock(node), 1, 'insert', flowSize(rows))
-    dockBlock(node, table, rows)
+  function landBlock(node: number, table: number, rows: number, traced: boolean): void {
+    leg(traced, rid.distToDock(node), 1, 'insert', flowSize(rows))
+    dockBlock(node, table, rows, traced)
   }
 
   /** The slice is at `node`'s insert dock, however it got there: write it. */
-  function dockBlock(node: number, table: number, rows: number): void {
+  function dockBlock(node: number, table: number, rows: number, traced: boolean): void {
+    // The async buffer ENDS this statement's journey: what comes out later is
+    // one part built from many statements, and it reserves a journey of its own.
     if (K.asyncInsert) queueAsyncInsert(node, table, rows)
-    else writeBlock(node, table, rows)
+    else writeBlock(node, table, rows, traced)
   }
 
   /* The background INSERT queue — what `system.distribution_queue` reports.
@@ -1278,9 +1342,9 @@ export function createSim(bus: Bus): SimApi {
    * shard. The real thing is one directory of .bin files per destination under
    * `data/<database>/<table>/`; the model keeps rows-per-shard, which is the
    * same information at this scale. */
-  const spool: { table: number; rows: number; due: number }[][][] = []
+  const spool: { table: number; rows: number; due: number; traced: boolean }[][][] = []
   for (let n = 0; n < N_NODES; n++) {
-    const perShard: { table: number; rows: number; due: number }[][] = []
+    const perShard: { table: number; rows: number; due: number; traced: boolean }[][] = []
     for (let s = 0; s < N_SHARDS; s++) perShard.push([])
     spool.push(perShard)
   }
@@ -1320,7 +1384,14 @@ export function createSim(bus: Bus): SimApi {
    * a foreground caller treats that as the statement's error, the queue
    * flush treats it as "keep the file and retry later".
    */
-  function deliverToShard(from: number, shard: number, table: number, rows: number, origin: 'dist' | 'spool'): boolean {
+  function deliverToShard(
+    from: number,
+    shard: number,
+    table: number,
+    rows: number,
+    origin: 'dist' | 'spool',
+    traced: boolean,
+  ): boolean {
     /* `prefer_localhost_replica` (on by default): a sender that is itself a
      * replica of the target shard writes the slice to ITSELF — a plain local
      * insert, no connection pool, and therefore NO FAILOVER. Even read-only:
@@ -1363,13 +1434,13 @@ export function createSim(bus: Bus): SimApi {
     // receiving yard never grows a tower before the pod that carries it has
     // visibly arrived.
     if (node !== from) {
-      flow(origin === 'spool' ? rid.spoolFlush(from, node) : rid.fanInsert(from, node), 1, 'insert', flowSize(rows))
-      onWire.push({ node, shard, table, rows, due: state.t + WIRE_S })
+      leg(traced, origin === 'spool' ? rid.spoolFlush(from, node) : rid.fanInsert(from, node), 1, 'insert', flowSize(rows))
+      onWire.push({ node, shard, table, rows, due: state.t + WIRE_S, traced })
     } else {
       // `origin` can only be 'dist' here: the local shard's slice never
       // enters the queue (see splitAtDistributed), and a queue directory for
       // a REMOTE shard cannot flush to this server.
-      landBlock(node, table, rows)
+      landBlock(node, table, rows, traced)
     }
     return true
   }
@@ -1559,7 +1630,7 @@ export function createSim(bus: Bus): SimApi {
     // The index probe carries the granules it had to consider, which is why a
     // query with no usable key prefix sends a visibly bigger pod up the tower
     // than one that lands on a narrow range.
-    flow(rid.probeIndex(node), 1, 'mark_read', flowSize(granulesTotal))
+    flow(rid.probeIndex(node, table), 1, 'mark_read', flowSize(granulesTotal))
 
     /* --- 3. skip indexes ------------------------------------------------ */
     let granulesAfterSkip = granulesAfterKey
@@ -1572,7 +1643,7 @@ export function createSim(bus: Bus): SimApi {
       const blocks = Math.ceil(granulesAfterKey / block)
       const survivingBlocks = Math.max(1, Math.round(blocks * (1 - idx.selectivity)))
       granulesAfterSkip = Math.min(granulesAfterKey, survivingBlocks * block)
-      flow(rid.probeSkip(node), 1, 'mark_read', flowSize(granulesAfterKey))
+      flow(rid.probeSkip(node, table), 1, 'mark_read', flowSize(granulesAfterKey))
     }
 
     granulesAfterSkip = Math.max(1, Math.round(granulesAfterSkip * share))
@@ -1581,7 +1652,7 @@ export function createSim(bus: Bus): SimApi {
     const marksNeeded = granulesAfterSkip * streams[table]
     const markBytes = marksNeeded * MARK_BYTES
     const markHit = touchCache(n.markCache, markBytes, markWorkingSet(node, table))
-    flow(rid.markToPool(node), 1, 'mark_read', flowSize(marksNeeded))
+    flow(rid.markToPool(node, table), 1, 'mark_read', flowSize(marksNeeded))
 
     /* --- 5. bytes, threads, and time ------------------------------------ */
     const rowsRead = granulesAfterSkip * INDEX_GRANULARITY
@@ -1679,7 +1750,9 @@ export function createSim(bus: Bus): SimApi {
       const chunk = Math.max(1, Math.ceil(q.granulesAfterSkip / q.threads))
       const begin = Math.floor(rng() * Math.max(1, granules - 1))
       r.state = 'seeking'
+      r.table = q.table
       r.part = part.slot
+      r.marksInPart = granules
       r.markBegin = begin
       r.markEnd = Math.min(granules, begin + chunk)
       r.marksDone = 0

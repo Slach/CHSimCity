@@ -104,6 +104,43 @@ describe('cluster shape', () => {
 })
 
 describe('the write path', () => {
+  /**
+   * The failure this pins down: the flow budget used to be spent per EMISSION,
+   * first come first served, so at a high insert rate the corridor pod paid and
+   * the legs behind it — the wheel, the queue, the dock, the commit — found the
+   * budget empty. The city drew freight arriving at the `Distributed` table and
+   * nothing leaving it, then towers appearing in the yard that nothing had
+   * delivered: a picture of data loss, produced by a drawing budget.
+   *
+   * The property is not "every statement is drawn". It is that a statement the
+   * city STARTS drawing is drawn to the end.
+   */
+  it('draws an INSERT end to end at a rate it cannot draw in full', () => {
+    const bus = createBus()
+    const seen = new Map<string, number>()
+    bus.on('flow', (f) => {
+      if (f.kind !== 'insert' && f.kind !== 'part_write') return
+      const key = f.route.replace(/\.\d+(\.\d+)?$/, '')
+      seen.set(key, (seen.get(key) ?? 0) + 1)
+    })
+    const sim = createSim(bus)
+    sim.setKnob('insertsPerSec', 200)
+    run(sim, 20)
+    // Drain: the last statements are still in the corridor and on the wire.
+    sim.setKnob('insertsPerSec', 0)
+    run(sim, 12)
+
+    const corridor = seen.get('client.to') ?? 0
+    const wheel = seen.get('node.shardkey') ?? 0
+    const commit = seen.get('node.commit') ?? 0
+    expect(corridor).toBeGreaterThan(0)
+    // Every statement whose corridor pod was drawn reaches the sharding key.
+    // Not a ratio: a dropped tail is the bug, and one is one too many.
+    expect(wheel).toBe(corridor)
+    // …and the parts it wrote are visibly committed into their band.
+    expect(commit).toBeGreaterThan(0)
+  })
+
   it('a part name encodes partition, block range and level', () => {
     const sim = makeSim()
     const part = sim.state.nodes[0].tables[0].parts.find((p) => p.state === 'active')
