@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { createBus } from '../src/core/bus'
 import { createSim } from '../src/sim/model'
-import { N_NODES, N_SHARDS } from '../src/core/types'
+import { MAX_READ_TASKS, N_NODES, N_SHARDS } from '../src/core/types'
 import type { Knobs, SimApi } from '../src/core/types'
 import { N_TABLES, nodeIndex, replicaOf, shardOf } from '../src/world/layout'
 
@@ -531,6 +531,136 @@ describe('the read path', () => {
       }
     })
     expect(checked).toBeGreaterThan(0)
+  })
+
+  /* --- what the read pool actually deals out -------------------------------
+   * The pool cuts up a list of (part, mark ranges). Everything below is a
+   * property of that cut, and each one was a way the old one-part-per-thread
+   * assignment lied: it could not span parts, could not overlap, and could not
+   * be stolen. */
+
+  it('a thread holds ranges from several parts, and the ranges are inside them', () => {
+    const sim = makeSim({ selectsPerSec: 24, insertsPerSec: 30 })
+    let spanning = 0
+    let tasksSeen = 0
+    observe(sim, 25, () => {
+      for (const nd of sim.state.nodes) {
+        for (const r of nd.readers) {
+          if (r.state === 'idle') continue
+          expect(r.taskCount).toBeGreaterThan(0)
+          expect(r.taskCount).toBeLessThanOrEqual(MAX_READ_TASKS)
+          let marks = 0
+          const parts = new Set<number>()
+          for (let i = 0; i < r.taskCount; i++) {
+            const task = r.tasks[i]
+            tasksSeen++
+            // A mark range is meaningless outside its own part.
+            expect(task.markEnd).toBeGreaterThan(task.markBegin)
+            expect(task.markEnd).toBeLessThanOrEqual(task.marksInPart)
+            parts.add(task.part)
+            marks += task.markEnd - task.markBegin
+          }
+          expect(r.marksTotal).toBe(marks)
+          if (parts.size > 1) spanning++
+        }
+      }
+    })
+    expect(tasksSeen).toBeGreaterThan(0)
+    // The whole point of the rework: with many parts on the node, some thread's
+    // share crosses a part boundary.
+    expect(spanning).toBeGreaterThan(0)
+  })
+
+  it('two threads of one query never hold the same mark', () => {
+    const sim = makeSim({ selectsPerSec: 24, insertsPerSec: 30 })
+    let compared = 0
+    observe(sim, 25, () => {
+      for (const nd of sim.state.nodes) {
+        // Ranges may only be compared WITHIN one query. Two queries reading the
+        // same table read the same parts, and both are entitled to the same marks.
+        const seen = new Map<string, [number, number][]>()
+        for (const r of nd.readers) {
+          if (r.state === 'idle' || r.query < 0) continue
+          for (let i = 0; i < r.taskCount; i++) {
+            const task = r.tasks[i]
+            const key = `${r.query}.${task.table}.${task.part}`
+            const list = seen.get(key) ?? []
+            for (const [b, e] of list) {
+              compared++
+              const overlaps = task.markBegin < e && b < task.markEnd
+              expect(overlaps, `two threads of query ${r.query} share marks in part ${task.part}`).toBe(false)
+            }
+            list.push([task.markBegin, task.markEnd])
+            seen.set(key, list)
+          }
+        }
+      }
+    })
+    expect(compared).toBeGreaterThan(0)
+  })
+
+  /* Index analysis finishes at plan time, before the pool exists
+   * (`initializePipeline` only consumes the memoised `selectRangesToRead`
+   * result). So a thread holding work for a query that is still analysing would
+   * be a thread reading granules the skip index had not finished discarding. */
+  it('no thread is given work while its query is still analysing', () => {
+    const sim = makeSim({ selectsPerSec: 24, insertsPerSec: 20 })
+    let analysing = 0
+    observe(sim, 25, () => {
+      for (const nd of sim.state.nodes) {
+        const planning = new Set<number>()
+        for (const q of nd.queries) if (q.analysing) planning.add(q.id)
+        analysing += planning.size
+        for (const r of nd.readers) {
+          if (r.state === 'idle') continue
+          expect(planning.has(r.query), `thread ${r.slot} is reading for a query still in analysis`).toBe(false)
+        }
+      }
+    })
+    expect(analysing).toBeGreaterThan(0)
+  })
+
+  /* `WithMergeableState`: a shard ships one row of aggregate state per group. The
+   * old model shipped `flowSize(rowsRead)`, which drew a billion-row scan
+   * dragging a billion rows across the network. */
+  it('an aggregate answers with groups, not with the rows it read', () => {
+    const sim = makeSim({ selectsPerSec: 20, insertsPerSec: 20 })
+    let checked = 0
+    let smaller = 0
+    observe(sim, 25, () => {
+      for (const nd of sim.state.nodes) {
+        for (const q of nd.queries) {
+          if (q.analysing) continue
+          checked++
+          expect(q.groups).toBeGreaterThan(0)
+          // A shard cannot report more groups than it has rows to group.
+          expect(q.groups).toBeLessThanOrEqual(Math.max(1, q.granulesAfterSkip * 8192))
+          if (q.groups < q.granulesAfterSkip * 8192) smaller++
+        }
+      }
+    })
+    expect(checked).toBeGreaterThan(0)
+    expect(smaller).toBeGreaterThan(0)
+  })
+
+  it('a query with a usable key prefix runs on fewer threads than a full scan', () => {
+    // `merge_tree_min_rows_for_concurrent_read`: how many threads run is decided
+    // by how much work survived the indexes, and only capped by max_threads.
+    const sim = makeSim({ selectsPerSec: 24, insertsPerSec: 30 })
+    let small = 0
+    let big = 0
+    const from = sim.state.nextQueryId
+    observe(sim, 25, () => {
+      for (const nd of sim.state.nodes) {
+        for (const q of nd.queries) {
+          if (q.id < from) continue
+          if (q.granulesAfterSkip * 4 < q.granulesTotal) small = Math.max(small, q.threads)
+          else big = Math.max(big, q.threads)
+        }
+      }
+    })
+    expect(big).toBeGreaterThan(0)
+    expect(small).toBeLessThanOrEqual(big)
   })
 })
 

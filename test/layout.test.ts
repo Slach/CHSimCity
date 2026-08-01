@@ -355,10 +355,14 @@ describe('the route network', () => {
         rid.sortBlock(n),
         rid.writeColumns(n),
         ...Array.from({ length: N_TABLES }, (_, t) => rid.commitPart(n, t)),
+        // The read path's planning phase: the query reaches the planner, every
+        // table's index is probed per part, the ranges come back, and ONE list
+        // goes to the pool.
+        rid.queryToAnalysis(n),
         ...Array.from({ length: N_TABLES }, (_, t) => rid.probeIndex(n, t)),
         ...Array.from({ length: N_TABLES }, (_, t) => rid.probeSkip(n, t)),
-        ...Array.from({ length: N_TABLES }, (_, t) => rid.markToPool(n, t)),
-        rid.readerToResult(n),
+        ...Array.from({ length: N_TABLES }, (_, t) => rid.skipToAnalysis(n, t)),
+        rid.rangesToPool(n),
         rid.yardToMerge(n),
         rid.mergeToYard(n),
         rid.yardToTtl(n),
@@ -369,7 +373,11 @@ describe('the route network', () => {
         rid.keeperToNode(n),
         rid.fetchPart(siblingOf(n), n),
       )
-      for (let th = 0; th < N_READ_THREADS; th++) ids.push(rid.poolToReader(n, th))
+      // Both directions are per THREAD: the pool hands each thread its own queue,
+      // and each thread has its own lane out of the yard.
+      for (let th = 0; th < N_READ_THREADS; th++) {
+        ids.push(rid.poolToReader(n, th), rid.readerToResult(n, th), rid.markToReader(n, th))
+      }
     }
     for (const id of ids) expect(ROUTES[id], `missing route ${id}`).toBeDefined()
   })

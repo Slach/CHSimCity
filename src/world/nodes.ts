@@ -1,7 +1,9 @@
 import * as THREE from 'three'
 import { COLOR } from '../core/theme'
 import {
+  currentTask,
   INDEX_GRANULARITY,
+  MAX_READ_TASKS,
   N_LEVEL_LANES,
   N_MERGE_SLOTS,
   N_NODES,
@@ -91,6 +93,15 @@ const _e = new THREE.Euler()
 const _m = new THREE.Matrix4()
 /** Height of one table's primary-index rack. Three of them stand per island. */
 const IDX_H = 20
+
+/**
+ * Lamps on `selectRangesToRead`: one per per-part analysis task in flight.
+ *
+ * A window, like the parts yard: a real query analyses every selected part, and a
+ * node here can have a hundred. The count of LIT lamps is the fraction of the
+ * analysis pool in use, never a claim about how many parts exist.
+ */
+const ANALYSIS_LAMPS = 9
 
 const _c = new THREE.Color()
 const _c2 = new THREE.Color()
@@ -206,6 +217,8 @@ interface Island {
   indexTicks: THREE.LineSegments
   /** One per table band: the beam lights for the table being read. */
   indexBeams: THREE.Mesh[]
+  /** `selectRangesToRead` — one lamp per per-part analysis task. */
+  analysisMesh: THREE.InstancedMesh
   /* skip indexes */
   skipMesh: THREE.InstancedMesh
   /* caches */
@@ -255,6 +268,7 @@ interface Island {
   ttlGlow: number
   /** Per table band, because each rack answers for one table. */
   indexGlow: Float32Array
+  analysisGlow: Float32Array
   skipGlow: Float32Array
 }
 
@@ -530,6 +544,50 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
     indexTicks.raycast = () => {}
     g.add(indexTicks)
 
+    /* ---- selectRangesToRead: index analysis ---------------------------- */
+
+    /* The planner, standing at the HEAD OF THE INDEX RACKS.
+     *
+     * It is here and not beside the read pool because this is what reads the
+     * indexes, and it happens before a pool exists. One lamp per analysis TASK,
+     * because the unit of this step is a part: `MergeTreeDataSelectExecutor`
+     * schedules one task per selected part on its own thread pool and waits for
+     * all of them. Lamps lighting together is the fact — parallel, per part — that
+     * a single duct into a single box could not state. */
+    const analysisBox = new THREE.Mesh(theme.box(13, 7, 16), matStruct)
+    analysisBox.position.set(LOCAL.indexAnalysis[0], 3.5, LOCAL.indexAnalysis[2])
+    analysisBox.castShadow = true
+    analysisBox.receiveShadow = true
+    g.add(analysisBox)
+    pushBoxEdges(edgeVerts, [LOCAL.indexAnalysis[0], 3.5, LOCAL.indexAnalysis[2], 13, 7, 16])
+
+    const analysisMesh = new THREE.InstancedMesh(unitBox, neonWhite, ANALYSIS_LAMPS)
+    analysisMesh.name = 'analysis.tasks'
+    analysisMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+    analysisMesh.frustumCulled = false
+    analysisMesh.raycast = () => {}
+    analysisMesh.userData.chNoShadow = true
+    for (let i = 0; i < ANALYSIS_LAMPS; i++) {
+      /* Slats, and they must not touch: at 1.6 deep on a 1.5 spacing they merged
+       * into one dark plate over the box, which read as a roof rather than as
+       * nine separate tasks. */
+      setBox(
+        analysisMesh,
+        i,
+        LOCAL.indexAnalysis[0],
+        7.5,
+        LOCAL.indexAnalysis[2] - 6.4 + (i / (ANALYSIS_LAMPS - 1)) * 12.8,
+        7.4,
+        0.9,
+        0.85,
+      )
+      _c.setRGB(0, 0, 0)
+      analysisMesh.setColorAt(i, _c)
+    }
+    analysisMesh.instanceColor!.setUsage(THREE.DynamicDrawUsage)
+    analysisMesh.instanceMatrix.needsUpdate = true
+    g.add(analysisMesh)
+
     /* ---- skip index sheds ---------------------------------------------- */
 
     // Three bays, and a shed only stands in one if the table has that index.
@@ -710,21 +768,26 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
 
     /* ---- the read beams: which part each thread is reading ------------- */
 
-    /* One beam per reader thread, from its bay down onto the PART its task came
-     * out of, its width the fraction of that part's marks the task covers.
-     * Without them the pool was a box that emitted pods towards its bays and the
-     * yard was a field of towers, and nothing on screen said that a task IS a
-     * mark range inside one named part — which is the single fact that makes
-     * `MergeTreeReadPool` different from a queue of parts. Same construction as
-     * the merge beams below, for the same reason: it points at the position
-     * updateYard damped, never at a recomputed one. */
-    const readBeamMesh = new THREE.InstancedMesh(unitBox, neonSoft, N_READ_THREADS)
+    /* One beam per TASK — up to `MAX_READ_TASKS` per thread — standing on the
+     * part that task's mark range lives in, its width the fraction of that part's
+     * marks the range covers.
+     *
+     * One beam per thread was the earlier version and it taught the wrong thing:
+     * a thread does not read a part, it reads a queue of ranges that came out of
+     * several parts, and the same part is normally being read by several threads
+     * at once. With one beam each you could not see either fact. The beam the
+     * thread is on RIGHT NOW is the bright one; the rest of its queue stands dim,
+     * because work it has not reached yet is still work it owns.
+     *
+     * Same construction as the merge beams below, for the same reason: it points
+     * at the position updateYard damped, never at a recomputed one. */
+    const readBeamMesh = new THREE.InstancedMesh(unitBox, neonSoft, N_READ_THREADS * MAX_READ_TASKS)
     readBeamMesh.name = 'readpool.beams'
     readBeamMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
     readBeamMesh.frustumCulled = false
     readBeamMesh.raycast = () => {}
     readBeamMesh.userData.chNoShadow = true
-    for (let i = 0; i < N_READ_THREADS; i++) {
+    for (let i = 0; i < N_READ_THREADS * MAX_READ_TASKS; i++) {
       parkBox(readBeamMesh, i)
       _c.setRGB(0, 0, 0)
       readBeamMesh.setColorAt(i, _c)
@@ -948,6 +1011,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       indexTower,
       indexTicks,
       indexBeams,
+      analysisMesh,
       skipMesh,
       markFill: markTank.fill,
       blockFill: blockTank.fill,
@@ -981,6 +1045,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       queueLevel: new Float32Array(N_QUEUE_SLOTS),
       ttlGlow: 0,
       indexGlow: new Float32Array(N_TABLES),
+      analysisGlow: new Float32Array(ANALYSIS_LAMPS),
       skipGlow: new Float32Array(MAX_SKIP * N_TABLES),
     }
 
@@ -996,6 +1061,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
     proxy(built, 'island', 0, 1, 0, CITY.node.w, 10, CITY.node.d)
     proxy(built, 'yard', 0, Y.baseY + Y.maxRise / 2, 0, Y.deckW, Y.maxRise + 4, Y.deckD)
     proxy(built, 'insertdock', 0, 6, LOCAL.insertDock[2], 96, 14, 22)
+    proxy(built, 'analysis', LOCAL.indexAnalysis[0], 5, LOCAL.indexAnalysis[2], 15, 12, 18)
     proxy(built, 'primaryindex', LOCAL.primaryIndex[0], idxH / 2, 0, 9, idxH, Math.abs(bandZLocal(0)) * 2 + 10)
     proxy(built, 'skipindexes', LOCAL.skipIndexes[0], 6, 0, 24, 12, Math.abs(bandZLocal(0)) * 2 + 10)
     proxy(built, 'markcache', LOCAL.markCache[0], deckY + TANK_H / 2, LOCAL.markCache[2], TANK_W, TANK_H + 6, TANK_D)
@@ -1104,6 +1170,35 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
         const nd = s.nodes[n]
         const delay = nd.insertDelay > 0.02 ? ` · delayed ${(nd.insertDelay * 100).toFixed(0)}%` : ''
         return `${fmtNum(nd.blocksWritten)} blocks · ${fmtNum(nd.insertRowsPerSec)} rows/s${delay}`
+      },
+    })
+
+    ctx.register({
+      id: `node.${n}.analysis`,
+      name: 'selectRangesToRead',
+      role: 'index analysis — one task per part, and it is over before a thread exists',
+      kind: 'process',
+      district: 'nodes',
+      object: P.analysis,
+      tier: 2,
+      focus: {
+        target: w(LOCAL.indexAnalysis[0], 6, LOCAL.indexAnalysis[2]),
+        distance: 70,
+        dir: [-0.7, 0.5, -0.4],
+      },
+      labelAt: w(LOCAL.indexAnalysis[0], 16, LOCAL.indexAnalysis[2]),
+      color: COLOR.primaryIndex,
+      readout: (s) => {
+        const nd = s.nodes[n]
+        let tasks = 0
+        let planning = 0
+        for (const q of nd.queries) {
+          if (!q.analysing) continue
+          planning++
+          tasks += q.partsSelected
+        }
+        if (planning === 0) return 'idle'
+        return `${planning} planning · ${fmtNum(tasks)} parts to analyse`
       },
     })
 
@@ -1330,6 +1425,25 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       /* ---- the parts yard --------------------------------------------- */
       updateYard(isl, sim, dt)
 
+      /* ---- selectRangesToRead: one lamp per per-part analysis task ----- */
+      /* The lamps are driven by `analysing`, not by a fraction of the query's
+       * duration: analysis is a PHASE that ends before the pool is created, and
+       * the model now says so explicitly. Parts analysed per query bounds how many
+       * lamps a query can light — one task per part is the unit. */
+      let analysisTasks = 0
+      for (const q of nd.queries) if (q.analysing) analysisTasks += Math.min(q.partsSelected, ANALYSIS_LAMPS)
+      for (let i = 0; i < ANALYSIS_LAMPS; i++) {
+        const on = i < analysisTasks ? 1 : 0
+        /* Damped slowly ON PURPOSE. Analysis is over in a tenth of a second, so at
+         * 12 the lamps flickered below what a 30 fps eye resolves and the building
+         * read as dead. The afterglow is the event's own trace. */
+        isl.analysisGlow[i] = damp(isl.analysisGlow[i], on, on > 0 ? 18 : 4, dt)
+        // The index's own colour: this is the thing that reads the indexes.
+        _c.setHex(COLOR.primaryIndex).multiplyScalar(0.06 + isl.analysisGlow[i] * 1.9)
+        isl.analysisMesh.setColorAt(i, _c)
+      }
+      isl.analysisMesh.instanceColor!.needsUpdate = true
+
       /* ---- the primary index, one rack per table ---------------------- */
       // Each rack lights only for queries on ITS OWN table, which is what makes
       // the racks worth having three of: you can see which table is being read.
@@ -1339,9 +1453,8 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
         let landed = 0.5
         for (const q of nd.queries) {
           if (q.table !== tb) continue
-          // The planning phase is the query's first fifth in the model.
-          const p = q.duration > 0 ? q.elapsed / q.duration : 1
-          if (p < 0.2) probing = Math.max(probing, 1 - p / 0.2)
+          // A rack is being read exactly while its query is in analysis.
+          if (q.analysing) probing = 1
           landed = clamp01(q.granulesAfterKey / Math.max(1, q.granulesTotal))
         }
         isl.indexGlow[tb] = damp(isl.indexGlow[tb], probing, 8, dt)
@@ -1421,30 +1534,50 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
         _c.setHex(COLOR.ok).multiplyScalar(active ? 1.3 : 0)
         isl.readerBarMesh.setColorAt(i, _c)
 
-        /* The beam onto the part this task came out of. A part beyond the yard's
+        /* One beam per task in this thread's queue. A part beyond the yard's
          * window has slot -1: the task is fully simulated, it just has nothing
          * to point at. */
-        if (active && r.part >= 0) {
-          const k = r.table * N_PART_SLOTS + r.part
+        const onTask = active ? currentTask(r) : -1
+        for (let j = 0; j < MAX_READ_TASKS; j++) {
+          const bi = i * MAX_READ_TASKS + j
+          const task = j < r.taskCount ? r.tasks[j] : null
+          if (!active || task === null || task.part < 0) {
+            parkBox(isl.readBeamMesh, bi)
+            _c.setRGB(0, 0, 0)
+            isl.readBeamMesh.setColorAt(bi, _c)
+            continue
+          }
+          const k = task.table * N_PART_SLOTS + task.part
           const px = isl.partX[k]
           const pz = isl.partZ[k]
-          const top = 7.5
-          const bottom = Y.baseY + 1
-          /* Width IS the task: the share of that part's marks this thread was
-           * given. A pool that hands out `min_marks_for_concurrent_read` at a
-           * time makes several narrow beams onto ONE part; a thread that got a
-           * whole small part makes one wide beam. Floored so a one-granule task
-           * is still visible. */
-          const share = r.marksInPart > 0 ? clamp01((r.markEnd - r.markBegin) / r.marksInPart) : 0.25
-          const w = 0.7 + share * 5
-          setBox(isl.readBeamMesh, i, px, (top + bottom) / 2, pz, w, Math.max(1, top - bottom), w)
-          // Same colour as the bay, so a beam and its thread are one thing.
-          _c.setHex(hex).multiplyScalar(0.45 + 0.35 * Math.sin(t * 7 + i))
-          isl.readBeamMesh.setColorAt(i, _c)
-        } else {
-          parkBox(isl.readBeamMesh, i)
-          _c.setRGB(0, 0, 0)
-          isl.readBeamMesh.setColorAt(i, _c)
+          /* IT HOVERS OVER ITS TOWER, and does not stand on the deck.
+           *
+           * Two failures were fixed here in one go. Ending at 7.5 put the beam
+           * inside the tower field — a tower reaches `Y.maxRise` — so from any low
+           * angle the yard hid it and the pool's work was invisible. Standing it on
+           * the deck instead made a box the same shape, on the same plane, as a
+           * PART: a beam that can be mistaken for a tower is a lie about how many
+           * parts there are. So it starts just above the tower it points at and
+           * hangs from a common ceiling, the way the merge beams do. */
+          const top = Y.baseY + Y.maxRise + 8
+          const bottom = Y.baseY + isl.partRise[k] + 1.2
+          /* Width IS the range: the share of that part's marks this task covers.
+           * So a big part split between several threads shows several narrow
+           * beams standing on the same tower, and a thread that got a whole small
+           * part shows one wide one. Floored so a one-granule task is visible. */
+          const share = task.marksInPart > 0 ? clamp01((task.markEnd - task.markBegin) / task.marksInPart) : 0.25
+          // Narrow: several beams have to stand on ONE tower without merging into
+          // a single column, because that is the fact they exist to show.
+          const w = 0.45 + share * 2.6
+          setBox(isl.readBeamMesh, bi, px, (top + bottom) / 2, pz, w, Math.max(1, top - bottom), w)
+          // Same colour as the bay, so a beam and its thread are one thing. The
+          // queued tasks are dim: owned, not yet being read.
+          /* Both raised after looking at the render: at 0.45/0.14 through a 42%
+           * transparent material the shafts were lost against the towers, which is
+           * the failure this whole mesh exists to fix. */
+          const gainJ = j === onTask ? 0.9 + 0.5 * Math.sin(t * 7 + i) : 0.3
+          _c.setHex(hex).multiplyScalar(gainJ)
+          isl.readBeamMesh.setColorAt(bi, _c)
         }
       }
       isl.readBeamMesh.instanceMatrix.needsUpdate = true
@@ -1866,6 +1999,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       isl.partMesh.dispose()
       isl.partCapMesh.dispose()
       isl.partCellMesh.dispose()
+      isl.analysisMesh.dispose()
       isl.skipMesh.dispose()
       isl.readerMesh.dispose()
       isl.readerBarMesh.dispose()

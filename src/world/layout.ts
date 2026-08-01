@@ -222,6 +222,17 @@ export const LOCAL = {
   primaryIndex: [-104, 0, 0],
   /** skp_idx_*.idx2 — between its table's primary rack and its table's band. */
   skipIndexes: [-82, 0, 0],
+  /**
+   * `selectRangesToRead` — index analysis, at the HEAD OF THE INDEX RACKS and
+   * nowhere near the read pool.
+   *
+   * It stands here because that is who reads the indexes. Analysis finishes
+   * during planning, on its own thread pool with one task per part, and only
+   * then does a pool exist; the ducts used to run from the pool's dispatcher to
+   * `primary.cidx`, which drew the pool interrogating the indexes — the exact
+   * opposite of the order of events.
+   */
+  indexAnalysis: [-104, 0, -58],
   /** The mark cache and the uncompressed cache, on one deck. */
   cacheDeck: [0, CITY.cacheDeck.y, -52],
   markCache: [-26, CITY.cacheDeck.y, -52],
@@ -944,11 +955,14 @@ export const rid = {
    * lit the same tube as a query on `hits`, and the tube ended at a building
    * that stood for all three at once.
    */
+  queryToAnalysis: (node: number) => `node.analyse.${node}`,
   probeIndex: (node: number, table: number) => `node.probe.${node}.${table}`,
   probeSkip: (node: number, table: number) => `node.skip.${node}.${table}`,
-  markToPool: (node: number, table: number) => `node.marks.${node}.${table}`,
+  skipToAnalysis: (node: number, table: number) => `node.skipback.${node}.${table}`,
+  rangesToPool: (node: number) => `node.ranges.${node}`,
+  markToReader: (node: number, thread: number) => `node.marks.${node}.${thread}`,
   poolToReader: (node: number, thread: number) => `node.reader.${node}.${thread}`,
-  readerToResult: (node: number) => `node.result.${node}`,
+  readerToResult: (node: number, thread: number) => `node.result.${node}.${thread}`,
   /** inside one node: merges, TTL, volumes */
   yardToMerge: (node: number) => `node.merge.${node}`,
   mergeToYard: (node: number) => `node.merged.${node}`,
@@ -1385,25 +1399,59 @@ for (let n = 0; n < N_NODES; n++) {
 }
 
 /* --- inside one node: the read path --------------------------------------
- * This is the sequence the whole project exists to make visible:
+ * This is the sequence the whole project exists to make visible, and it is in
+ * TWO PHASES that happen at different times and in different places:
  *
- *   1. partition pruning throws away whole partitions
- *   2. the primary index (primary.cidx) is binary-searched to mark ranges
- *   3. skip indexes throw away granules inside those ranges
- *   4. MergeTreeReadPool hands the surviving ranges to max_threads readers
- *   5. each reader resolves marks (mark cache), reads and decompresses blocks
- *      (uncompressed cache), and streams columns up
+ *   PLANNING — before a reader thread exists:
+ *   1. whole PARTS go, by partition key, partition minmax and column statistics
+ *   2. per part, in parallel, `primary.cidx` turns the query into MARK RANGES
+ *   3. per part, `skp_idx_*` throws GRANULES away inside those ranges
+ *   4. the surviving (part, ranges) list is handed to the pipeline
  *
- * Each step is its own road because each step is a different *decision*, and
- * because you can watch which one is doing the work. */
+ *   EXECUTION — the pool and its threads:
+ *   5. `MergeTreeReadPool` cuts that list into a queue per reader thread
+ *   6. each thread resolves marks (mark cache), reads and decompresses blocks
+ *      (uncompressed cache), applies PREWHERE to ROWS, and streams blocks up
+ *
+ * The order matters more than the steps. The analysis ducts used to leave the
+ * POOL's dispatcher, which drew the pool interrogating the indexes; the source
+ * is unambiguous that analysis is memoised at plan time and the pipeline only
+ * consumes the result (`ReadFromMergeTree::initializePipeline` →
+ * `getAnalysisResult`), on its own per-part thread pool. So the ducts now leave
+ * `selectRangesToRead` at the head of the index racks, and the only thing that
+ * reaches the pool is the finished list.
+ *
+ * The mark cache moved for the same reason: analysis reads the INDEX caches
+ * (`getIndexMarkCache`), while `.mrk3` is resolved by the thread that is about
+ * to seek. So the mark cache now feeds the reader BAYS, not the dispatcher. */
 
 for (let n = 0; n < N_NODES; n++) {
   const disp = anchorAt(n, 'readPoolDispatcher')
   const mc = anchorAt(n, 'markCache')
   const yard = anchorAt(n, 'partsYard')
-  const pool = anchorAt(n, 'readPool')
+  const analysis = anchorAt(n, 'indexAnalysis')
+  const door = anchorAt(n, 'distTable')
   const host = nodeHost(n)
   const poolEnd: RouteEnd = { label: `${host} · read pool`, id: `node.${n}.readpool` }
+  const analysisEnd: RouteEnd = { label: `${host} · selectRangesToRead`, id: `node.${n}.analysis` }
+
+  /* The query arriving at the planner. What travels is the WHERE clause, not
+   * data, so its size is a constant. */
+  route(
+    rid.queryToAnalysis(n),
+    [
+      [door[0] - 6, 6, door[2] + 4],
+      nodeLocal(n, -60, 20, -84),
+      [analysis[0], 12, analysis[2] - 6],
+    ],
+    {
+      what: 'a query on its way to index analysis',
+      from: { label: `${host} · Distributed`, id: `node.${n}.dist` },
+      to: analysisEnd,
+      note: 'The predicate, going where the decisions are made. `selectRangesToRead` runs during PLANNING and its result is memoised, so by the time there is a pipeline — let alone a reader thread — every part and every granule this query will not read has already been discarded. Whole PARTS go first, by the partition key, by the partition minmax index and by column statistics, without a single index file being opened.',
+    },
+    { color: COLOR.reader, speed: 190, size: 0.9, roadOpacity: 0.3 },
+  )
 
   /* THE ANALYSIS LEGS, ONE SET PER TABLE.
    *
@@ -1428,15 +1476,13 @@ for (let n = 0; n < N_NODES; n++) {
     route(
       rid.probeIndex(n, t),
       [
-        [disp[0], 8, disp[2]],
-        nodeLocal(n, 74, READ_Y, -66),
-        nodeLocal(n, 0, READ_Y, bandZLocal(t) - 34),
-        nodeLocal(n, -86, READ_Y - 8, bandZLocal(t) - 10),
+        [analysis[0] + 4, 10, analysis[2] + 4],
+        nodeLocal(n, -96, READ_Y - 6, bandZLocal(t) - 30),
         [gate[0], 13, gate[2]],
       ],
       {
         what: `a query looking for granules in ${tbl}`,
-        from: poolEnd,
+        from: analysisEnd,
         to: pkEnd,
         note: `Once per PART of ${tbl}, in parallel, and never once for the table: each part carries its own \`primary.cidx\` with one sorting-key row per granule. What comes back is MARK RANGES — \`[begin × index_granularity, end × index_granularity)\` inside that one part — and a range in one part has nothing to do with the same numbers in another. Only a predicate that is one continuous key interval gets a true binary search; anything with \`IN\` or \`OR\` gets a coarse recursive exclusion search instead, which is why those leave many disjoint ranges behind.`,
       },
@@ -1459,27 +1505,50 @@ for (let n = 0; n < N_NODES; n++) {
       { color: COLOR.skipIndex, speed: 140, size: 0.95, visible: true, roadOpacity: 0.26 },
     )
 
+    /* The narrowed ranges going back to the analysis, per table. It is the same
+     * per-part task returning with its answer: the ranges left for THAT part. */
     route(
-      rid.markToPool(n, t),
+      rid.skipToAnalysis(n, t),
       [
-        [skipG[0] + 3, 10, skipG[2] + 3],
-        nodeLocal(n, -60, 17, bandZLocal(t) + 8),
-        [mc[0], mc[1] + 4, mc[2] + 4],
-        nodeLocal(n, 70, 14, -62),
-        [disp[0] - 6, 8, disp[2] + 4],
+        [skipG[0], 9, skipG[2] + 4],
+        nodeLocal(n, -94, 16, bandZLocal(t) + 12),
+        [analysis[0], 11, analysis[2] + 6],
       ],
       {
-        what: 'the surviving ranges, and the marks that locate them',
+        what: `the granules left to read in ${tbl}`,
         from: skEnd,
-        to: poolEnd,
-        note: 'What reaches the pool is a list of (part, mark ranges) — the work the query has left after both indexes. A mark is the `.mrk3` entry holding the offset of the granule in the compressed `.bin` and the offset inside the decompressed block; the mark cache holds whole marks FILES, per part and stream, so a miss costs a disk read before the read has even begun. Adjacent ranges closer together than `merge_tree_min_rows_for_seek` were already coalesced here, so a few of the granules on their way in were never matched at all — seeking past them was not worth it.',
+        to: analysisEnd,
+        note: 'The per-part answer coming back to the analysis, which collects one of these from every part it did not already drop. Adjacent ranges closer together than `merge_tree_min_rows_for_seek` were coalesced on the way, so some granules in this list were never matched by anything — seeking past them was not worth the seek.',
       },
-      { color: COLOR.markCache, speed: 160, size: 0.9 },
+      { color: COLOR.skipIndex, speed: 150, size: 0.85, roadOpacity: 0.22 },
     )
   }
 
+  /* THE HANDOVER, ONCE PER QUERY AND NOT PER TABLE: the finished
+   * (part, mark ranges) list, from the planner to the pool. This is the only
+   * thing the pool is ever given, and it is why the pool cannot be drawn asking
+   * an index anything. Held high across the whole island because it is the seam
+   * between planning and execution. */
+  route(
+    rid.rangesToPool(n),
+    [
+      [analysis[0] + 6, 12, analysis[2]],
+      nodeLocal(n, -40, READ_Y + 2, -74),
+      nodeLocal(n, 60, READ_Y + 2, -70),
+      [disp[0] - 6, 9, disp[2] - 4],
+    ],
+    {
+      what: 'the surviving (part, mark ranges) list, handed to the pipeline',
+      from: analysisEnd,
+      to: poolEnd,
+      note: 'The whole result of planning: for each part that survived, the mark ranges inside it that still have to be read. `initializePipeline` consumes this memoised result — it never re-runs the analysis — so everything downstream of here is I/O, and every decision about what NOT to read has already been made.',
+    },
+    { color: COLOR.reader, speed: 170, size: 1.0, roadOpacity: 0.3 },
+  )
+
   for (let th = 0; th < N_READ_THREADS; th++) {
     const bay = nodeLocal(n, readerBayLocal(th)[0], 0, readerBayLocal(th)[2])
+    const threadEnd: RouteEnd = { label: `${host} · reader thread ${th + 1}`, id: `node.${n}.readpool` }
     route(
       rid.poolToReader(n, th),
       [
@@ -1490,28 +1559,66 @@ for (let n = 0; n < N_NODES; n++) {
       {
         what: 'a batch of mark ranges handed to one reader thread',
         from: poolEnd,
-        to: { label: `${host} · reader thread ${th + 1}`, id: `node.${n}.readpool` },
-        note: '`MergeTreeReadPool` hands out work in batches rather than splitting the query up front, so a thread that finishes early comes back for more instead of idling while another finishes a hot range. `max_threads` is how many of these bays exist.',
+        to: threadEnd,
+        note: 'What arrives is a QUEUE of mark ranges out of SEVERAL parts, not a part — the pool cuts up the concatenated (part, ranges) list the index analysis produced. The pod is as big as the queue, so the uneven dealing is visible. A thread whose queue runs dry takes work off the back of another thread\'s, which is why `max_threads` threads do not finish at `max_threads` different times.',
       },
-      { color: COLOR.reader, speed: 120, size: 0.85 },
+      { color: COLOR.reader, speed: 120, size: 0.6 },
+    )
+
+    /* ONE LANE PER THREAD, out of the yard.
+     *
+     * There used to be a single `node.result.N` duct, so eight threads reading
+     * eight different parts sent everything up one pipe and the pool looked like
+     * a funnel with one input. It is a many-to-many: every thread reaches into
+     * several parts, and several threads reach into the same part. The lanes are
+     * fanned out along the yard's east edge so they read as eight separate
+     * streams rather than one thick one. */
+    const laneZ = yard[2] + (th - (N_READ_THREADS - 1) / 2) * 7
+    route(
+      rid.readerToResult(n, th),
+      [
+        [yard[0] + 34, 5, laneZ],
+        [(yard[0] + 34 + bay[0]) / 2, 7.5, (laneZ + bay[2]) / 2],
+        [bay[0] - 5.5, 5.5, bay[2]],
+      ],
+      {
+        what: `decompressed column data on its way to reader thread ${th + 1}`,
+        from: { label: `${host} · parts yard`, id: `node.${n}.yard` },
+        to: threadEnd,
+        note: 'The bytes actually read, by the thread that asked for them. Every one of them was in a granule some earlier step failed to eliminate, which is why a query that names the wrong column can read a hundred times more than one that names the right one. Which part they came out of changes as the thread works through its queue.',
+      },
+      /* Size 0.55, not 1: a block of `max_block_size` rows is a mid-scale pod, and
+       * these ducts are the shortest in the model. At 1 the stripe was longer than
+       * the duct it travelled on, which reads as one big object sliding rather than
+       * many blocks streaming. */
+      { color: COLOR.blockCache, speed: 130, size: 0.55, roadOpacity: 0.2 },
+    )
+
+    /* THE MARK, going to the THREAD that is about to seek.
+     *
+     * Not to the pool: the pool never touches `.mrk3`. `MergeTreeMarksLoader`
+     * runs inside the reading thread and asks the global `MarkCache` for the
+     * whole marks file of that part and stream — which is why a miss here is a
+     * real disk read per stream, before a single byte of data has been read, and
+     * why the seeking phase can dominate a bay. Index analysis used a DIFFERENT
+     * pair of caches (`getIndexMarkCache`), which is exactly why this duct could
+     * not stay where it was. */
+    route(
+      rid.markToReader(n, th),
+      [
+        [mc[0] + 8, mc[1] + 2, mc[2] + 2],
+        nodeLocal(n, 62, 16, -58),
+        [bay[0] + 4, 6.5, bay[2] - 3],
+      ],
+      {
+        what: `a marks file resolved for reader thread ${th + 1}`,
+        from: { label: `${host} · mark cache`, id: `node.${n}.markcache` },
+        to: threadEnd,
+        note: 'A mark is the `.mrk3` entry holding where a granule starts in the compressed `.bin` and how far into the decompressed block its first row is. The cache holds whole marks FILES, per part and per stream, so on a wide table the working set is measured in gigabytes and a miss is a small random read — per stream, before the read proper begins.',
+      },
+      { color: COLOR.markCache, speed: 160, size: 0.5, roadOpacity: 0.18 },
     )
   }
-
-  route(
-    rid.readerToResult(n),
-    [
-      [yard[0] + 40, 5, yard[2] + 4],
-      [pool[0] - 24, 7, pool[2] + 10],
-      [pool[0], 6, pool[2]],
-    ],
-    {
-      what: 'decompressed column data streaming up',
-      from: { label: `${host} · parts yard`, id: `node.${n}.yard` },
-      to: poolEnd,
-      note: 'The bytes actually read. Every one of them was in a granule some earlier step failed to eliminate, which is why a query that names the wrong column can read a hundred times more than one that names the right one.',
-    },
-    { color: COLOR.blockCache, speed: 130, size: 1.0 },
-  )
 }
 
 /* --- inside one node: merges and TTL -------------------------------------

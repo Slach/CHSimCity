@@ -213,7 +213,8 @@ The application's choice of server is modelled as a driver policy — round robi
         label: 'Spooled bytes',
         get: (s) => fmtBytes(sumNodes(s, (n) => n.distributed.pendingBytes.reduce((a, b) => a + b, 0))),
       },
-      { label: 'Rows merged', get: (s) => fmtNum(sumNodes(s, (n) => n.distributed.rowsMerged)) },
+      // State rows, not rows read: what a shard sends is one row per group.
+      { label: 'State rows merged', get: (s) => fmtNum(sumNodes(s, (n) => n.distributed.rowsMerged)) },
       { label: 'From remote', get: (s) => fmtBytes(sumNodes(s, (n) => n.distributed.bytesFromRemote)) },
     ],
     knobs: ['clientBalancing', 'distributedInsert', 'loadBalancing', 'parallelReplicas', 'insertQuorum'],
@@ -332,13 +333,27 @@ Older material calls all of this the "directory monitor": \`insert_distributed_s
     sections: [
       {
         heading: 'Two-stage aggregation',
-        body: `\`SELECT status, count() FROM hits_dist GROUP BY status\` does not ship rows. Each shard runs the aggregation over its own data and ships a **partial aggregate state**; the initiator merges those states and finalises.
+        body: `\`SELECT status, count() FROM hits_dist GROUP BY status\` does not ship rows. With more than one shard involved, \`StorageDistributed::getQueryProcessingStage\` returns \`WithMergeableState\`: each shard runs the aggregation over its own data and ships a **partial aggregate state**, one row per group; the initiator's \`MergingAggregatedStep\` merges those states and finalises.
 
-That is why a distributed \`GROUP BY\` on a low-cardinality key is nearly free and one on a high-cardinality key is not — the state that crosses the network is proportional to the number of groups, not to the number of rows.`,
+That is why a distributed \`GROUP BY\` on a low-cardinality key is nearly free and one on a high-cardinality key is not — the state that crosses the network is proportional to the number of GROUPS, not to the number of rows. The packets in the city are sized by exactly that, so a query that scanned a billion rows and grouped by one small column brings home a short train.
+
+Once a shard's hash table passes \`group_by_two_level_threshold\` (100,000 rows) its aggregation goes two-level and the states it ships carry bucket numbers. That is what lets \`distributed_aggregation_memory_efficient\` — on by default — merge bucket *N* from every shard together and hold one bucket at a time instead of every shard's whole result.
+
+One shard only, and the picture changes completely: the shard is told to go to \`Complete\` and the initiator is a proxy.`,
       },
       {
         heading: 'What crosses the network',
-        body: `Aggregate states, sorted blocks for an \`ORDER BY … LIMIT\`, and nothing else if the query allows it. A \`SELECT *\` with no filter genuinely does ship every row, and that is the query to look for when a distributed cluster feels slow for no reason.`,
+        body: `Aggregate states, sorted blocks for an \`ORDER BY … LIMIT\`, and nothing else if the query allows it. A \`SELECT *\` with no filter genuinely does ship every row, and that is the query to look for when a distributed cluster feels slow for no reason.
+
+\`ORDER BY … LIMIT n\` without aggregation is the case worth knowing: \`distributed_push_down_limit\` is 1 by default, so each shard sorts *and* applies \`offset + limit\` itself and ships at most that many already-sorted rows. The initiator does a k-way merge, not a re-sort.
+
+Outbound, what leaves the initiator is the **rewritten SQL text** — \`db.dist\` replaced by the shard-local table, \`SETTINGS\` stripped because the settings travel in the query context. A serialised plan crosses instead only with \`serialize_query_plan\`, which is off by default.`,
+      },
+      {
+        heading: 'The initiator’s own shard is not privileged',
+        body: `With \`prefer_localhost_replica\` on — the default — the initiator's own shard runs the identical rewritten query at the identical stage, in-process, with no socket. It is not exempt from the work; it is exempt from the network. That is why the model counts \`bytesFromRemote\` for the other shards only, and why the merging cost lands on whichever server the clients happened to connect to.
+
+Each shard also gets its own \`query_id\`, sharing the initiator's \`initial_query_id\` — so one distributed SELECT is N + 1 rows in \`system.query_log\`, and \`is_initial_query = 0\` on the shards' rows.`,
       },
       {
         heading: 'The slowest shard sets the pace',
@@ -348,7 +363,8 @@ This is the argument for keeping shards balanced that has nothing to do with dis
       },
     ],
     metrics: [
-      { label: 'Rows merged', get: (s) => fmtNum(sumNodes(s, (n) => n.distributed.rowsMerged)) },
+      // State rows, not rows read: what a shard sends is one row per group.
+      { label: 'State rows merged', get: (s) => fmtNum(sumNodes(s, (n) => n.distributed.rowsMerged)) },
       { label: 'From remote', get: (s) => fmtBytes(sumNodes(s, (n) => n.distributed.bytesFromRemote)) },
       { label: 'Mean query', get: (s) => `${s.stats.meanQueryMs.toFixed(0)} ms` },
     ],
@@ -622,6 +638,77 @@ Compact versus Wide part format is described but not drawn. \`min_rows_for_wide_
    * The read path
    * ====================================================================*/
   {
+    id: 'node.analysis',
+    title: 'selectRangesToRead',
+    subtitle: 'index analysis — one task per part, finished before a thread exists',
+    tldr: 'Everything a query decides NOT to read, it decides here, at plan time.',
+    sections: [
+      {
+        heading: 'Why this is not part of the read pool',
+        body: `A query plan asks \`ReadFromMergeTree\` what it is going to read *while it is still being optimised*, and the answer is memoised: \`initializePipeline\` calls \`getAnalysisResult()\` and uses whatever is already there. So by the time the pipeline exists — let alone a reader thread — the list of parts and mark ranges is fixed.
+
+That ordering is why this building stands at the head of the index racks and not next to \`MergeTreeReadPool\`. The pool is *given* a list. It never asks an index anything, and no reader thread ever opens \`primary.cidx\`.
+
+It can run more than once: a projection, a JOIN or a parallel-replicas decision can rebuild the step, and the server counts the rounds in the \`IndexAnalysisRounds\` profile event.`,
+      },
+      {
+        heading: 'One task per part, in parallel',
+        body: `The unit of this step is a PART. \`MergeTreeDataSelectExecutor\` schedules one task per selected part on its own thread pool — bounded by \`max_threads_for_indexes\`, which is 0 (meaning "as many as there are streams") by default — and waits for all of them.
+
+That is what the row of lamps is: analysis tasks in flight, each one a part opening its own index files. It is a window, like the parts yard — a real query analyses every selected part, and this server can have hundreds.`,
+      },
+      {
+        heading: 'The order of the sieve, and what each step removes',
+        body: `The steps are not interchangeable, and each one removes a different UNIT:
+
+**Whole parts** — the partition key, then the partition minmax index, then column statistics. No index file is opened for any of this.
+
+**Granules** — the query condition cache (if \`use_query_condition_cache\` is on), then \`primary.cidx\` producing mark ranges, then the skip indexes narrowing them.
+
+**Rows** — PREWHERE, and PREWHERE only. It is the one filter that runs inside a reader thread, on data already read.
+
+So: parts are gone before any thread reads, granules are gone before any thread reads, and rows are the only thing a reading thread throws away.`,
+      },
+      {
+        heading: 'It uses different caches from the reading',
+        body: `Analysis reads index files through the *index* caches — \`getIndexMarkCache()\` and \`getIndexUncompressedCache()\` — which are separate from the \`MarkCache\` and uncompressed cache a reader thread uses for \`.mrk3\` and data blocks. Sizing one tells you nothing about the other.
+
+This is also why the mark-cache duct in the city runs to the reader BAYS: \`MergeTreeMarksLoader\` runs inside the thread that is about to seek, not here.`,
+      },
+      {
+        heading: 'What the model simplifies',
+        body: `The pods are capped at five per table however many parts were selected, so the drawing stays inside its frame budget; \`partsSelected\` on the query still counts every part. Analysis is given a fixed short duration rather than a cost derived from index size. Sampling, projections, \`_part\` value filtering, column statistics and the query condition cache are named here but not simulated as separate steps.`,
+      },
+    ],
+    metrics: [
+      {
+        label: 'Planning now',
+        get: (s) => {
+          let planning = 0
+          let parts = 0
+          for (const nd of s.nodes) {
+            for (const q of nd.queries) {
+              if (!q.analysing) continue
+              planning++
+              parts += q.partsSelected
+            }
+          }
+          return planning === 0 ? 'idle' : `${planning} queries · ${fmtNum(parts)} parts`
+        },
+      },
+      {
+        label: 'granules total',
+        get: (s) => (s.nodes[0].queries[0] ? fmtNum(s.nodes[0].queries[0].granulesTotal) : '—'),
+      },
+      {
+        label: 'after skip',
+        get: (s) => (s.nodes[0].queries[0] ? fmtNum(s.nodes[0].queries[0].granulesAfterSkip) : '—'),
+      },
+    ],
+    see: ['node.primaryindex', 'node.skipindexes', 'node.readpool'],
+  },
+
+  {
     id: 'node.primaryindex',
     title: 'primary.cidx',
     subtitle: `the sparse primary index — one key row per ${GRAN}-row granule`,
@@ -753,8 +840,22 @@ Lower granularity means a bigger index and finer pruning. \`GRANULARITY 1\` on a
 \`tokenbf_v1\` on a URL column is genuinely good: most blocks do not contain the token you are searching for, so most blocks are skipped. The cost is that you must size it — \`tokenbf_v1(size_bytes, hashes, seed)\` — and an undersized filter saturates and prunes nothing, exactly like an overflowed set.`,
       },
       {
+        heading: 'Where and when they actually run',
+        body: `In \`selectRangesToRead\`, at plan time, per part, on the analysis thread pool — after the primary key and never instead of it. A part the primary key already emptied is not consulted at all, and a part whose index file is missing is passed through untouched with a line in the log rather than an error.
+
+The unit is index-mark space: the surviving mark ranges are mapped into \`GRANULARITY n\`-sized index granules, filtered, expanded back, and then ranges closer together than \`merge_tree_min_rows_for_seek\` are coalesced — so a few granules survive that nothing matched, because seeking past them was not worth the seek.
+
+They read through the **index** caches (\`getIndexMarkCache\`, \`getIndexUncompressedCache\`), not through the mark cache and uncompressed cache a reader thread uses. Sizing one tells you nothing about the other.
+
+One exception to "at plan time": an index can be marked as applicable *during* the data read, in which case analysis skips it and the reader applies it. Vector similarity indexes are never eligible for that.`,
+      },
+      {
+        heading: 'On the file name',
+        body: `\`.idx\` and \`.idx2\` are the same artefact at two serialization versions — the extension encodes the version, and the server probes the part's checksums to see which one is there. So \`skp_idx_region.idx\` and \`skp_idx_region.idx2\` are not two different things, and a part written by an older server can carry the older name.`,
+      },
+      {
         heading: 'What the model simplifies',
-        body: `Pruning is a per-index selectivity constant rather than a real filter evaluation. \`GRANULARITY\` is honoured as a resolution floor. Index build cost on INSERT and on merge is not charged.`,
+        body: `Pruning is a per-index selectivity constant rather than a real filter evaluation. \`GRANULARITY\` is honoured as a resolution floor. Index build cost on INSERT and on merge is not charged. The per-part index order, the on-data-read variant above, and the vector-similarity index cache are not modelled.`,
       },
     ],
     metrics: [
@@ -801,22 +902,34 @@ Lower granularity means a bigger index and finer pruning. \`GRANULARITY 1\` on a
     tldr: 'Three numbers explain every ClickHouse query: granules total, after key, after skip.',
     sections: [
       {
-        heading: 'The whole read path, in order',
-        body: `**1. Partition pruning.** The partition expression is evaluated against the WHERE clause and whole partitions are discarded without opening a single file. This is the cheapest pruning there is, and it is why the partition key should follow how you query.
+        heading: 'The whole read path, in order — and in two phases',
+        body: `**Planning, in \`selectRangesToRead\`, before this pool exists:**
 
-**2. The primary index.** Binary search over \`primary.cidx\` per selected part, producing mark ranges.
+**1. Partition pruning.** The partition expression is evaluated against the WHERE clause and whole partitions are discarded without opening a single file — then the partition minmax index and column statistics drop more whole parts.
 
-**3. Skip indexes.** Inside those ranges, each \`skp_idx_*.idx2\` is consulted and blocks it can prove irrelevant are dropped.
+**2. The primary index.** Per selected part, in parallel, \`primary.cidx\` is searched and mark ranges come back.
 
-**4. The read pool.** The surviving mark ranges are dealt out to \`max_threads\` reader threads.
+**3. Skip indexes.** Inside those ranges, each \`skp_idx_*\` is consulted and granules it can prove irrelevant are dropped.
 
-**5. The readers.** Each resolves a mark through the mark cache, reads the compressed block it points at, checks the uncompressed cache, decompresses if it must, and streams the columns up.`,
+**Execution, which is where this pool starts:**
+
+**4. The read pool.** The finished \`(part, mark ranges)\` list is cut into per-thread queues, each one spanning whichever parts its slice happens to cover. The pool is *handed* this list; it never consults an index, and neither does any reader thread.
+
+**5. The readers.** Each resolves a mark through the mark cache — inside the reading thread, which is why the seeking phase is a real phase — reads the compressed block it points at, checks the uncompressed cache, decompresses if it must, applies PREWHERE to the ROWS, and streams blocks of at most \`max_block_size\` up.`,
       },
       {
-        heading: 'The pool does not deal evenly, on purpose',
-        body: `\`MergeTreeReadPool::fillPerThreadInfo\` hands out the biggest tasks first so the threads finish at about the same moment. A pool that dealt evenly would leave one thread reading a huge part while the rest idled, and the query's latency is its slowest thread.
+        heading: 'A thread does not get a part. It gets pieces of several',
+        body: `What reaches the pool is a LIST of \`(part, mark ranges)\`, and \`fillPerThreadInfo\` cuts that list up — it does not distribute parts. So one thread's workload is normally a few ranges out of a few *different* parts, each read through that part's own \`primary.cidx\` and its own skip-index files, and the same big part is being read by several threads at once.
 
-That is the entire reason this is a class and not a queue.`,
+Watch the beams standing in the yard. Each one is one task: which part it stands on is where the range lives, how wide it is is how much of that part the range covers, and the bright one is the task its thread is on right now. Several narrow beams on one tower means several threads are inside that part; one thread's beams landing on four towers means its queue spans four parts.
+
+A pool that gave one part to one thread would be a queue, and the query's latency is its slowest thread — so it would stall on whichever thread drew the biggest part. That is the entire reason this is a class.`,
+      },
+      {
+        heading: 'Stealing, and why max_threads is a ceiling not an allocation',
+        body: `\`getTask\` lets a thread whose own queue has run dry take work off the back of another thread's. The deal is an estimate; stealing is what makes a wrong estimate cheap.
+
+How many threads actually run is not \`max_threads\` either. The pool divides the surviving marks by \`merge_tree_min_rows_for_concurrent_read\` (163840 rows — twenty granules at the default \`index_granularity\`) and uses that many, capped by \`max_threads\`. An indexed lookup therefore lights ONE bay however high you set it, because starting eight threads to read twelve granules costs more than reading them. Raise the granule count — drop the WHERE, or query a column the sorting key cannot help — and the rest of the bays light up.`,
       },
       {
         heading: 'The reader phases, and what they tell you',
@@ -842,7 +955,9 @@ This is why the answer to "my queries OOM" is sometimes to *lower* \`max_threads
       },
       {
         heading: 'What the model simplifies',
-        body: `Mark ranges are assigned at random rather than by actual size ordering; the *shape* of the assignment is right and the ordering is not. \`max_streams\`, prewhere, and the difference between \`Coordinator\` and \`InOrder\` pools are not modelled. Rows inside a granule are counted, never materialised.`,
+        body: `The surviving marks are spread over the selected parts in proportion to their size, and the range's position inside each part is arbitrary. That is right in shape — every part carries the whole key range of the table, so a range predicate really does leave a piece of nearly every part behind — but a real analysis computes the exact ranges per part, and it deals the biggest tasks first, which the model does not.
+
+A thread's queue is shown up to five tasks deep; a real one is unbounded. Stealing is modelled as one round after the deal rather than continuously. \`max_streams\`, PREWHERE, and the difference between \`Coordinator\` and \`InOrder\` pools are not modelled. Rows inside a granule are counted, never materialised.`,
       },
     ],
     metrics: [
@@ -852,6 +967,24 @@ This is why the answer to "my queries OOM" is sometimes to *lower* \`max_threads
           let b = 0
           for (const r of s.nodes[0].readers) if (r.state !== 'idle') b++
           return `${b} / ${N_READ_THREADS}`
+        },
+      },
+      {
+        // The number that says the pool is not a queue of parts: how many parts
+        // one busy thread is holding ranges from, right now.
+        label: 'Parts per busy thread',
+        get: (s) => {
+          let tasks = 0
+          let busy = 0
+          let stolen = 0
+          for (const r of s.nodes[0].readers) {
+            if (r.state === 'idle') continue
+            busy++
+            tasks += r.taskCount
+            if (r.stolenFrom >= 0) stolen++
+          }
+          if (busy === 0) return '—'
+          return `${(tasks / busy).toFixed(1)}${stolen > 0 ? ` · ${stolen} stealing` : ''}`
         },
       },
       {

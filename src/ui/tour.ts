@@ -85,9 +85,10 @@ export const CHAPTERS: TourChapter[] = [
   {
     id: 'read-pool',
     title: 'The read pool, and the phases',
-    body: 'Mark ranges are dealt out to max_threads reader threads, biggest first, so they finish together. Each bay’s colour is the phase, and the colours are borrowed from whichever cache decides it: orange for seeking, blue for reading, teal for decompressing. If seeking dominates, your mark cache is too small.',
+    body: 'The pool is handed a finished list of (part, mark ranges) and cuts it into a queue per thread — so one thread reads pieces of several parts, and one part is read by several threads. Watch the beams standing in the yard: each is one task, the bright one is the task its thread is on. Each bay’s colour is the phase, borrowed from whichever cache decides it: orange for seeking, blue for reading, teal for decompressing. If seeking dominates, your mark cache is too small.',
     focus: 'node.0.readpool',
     duration: 20,
+    knobs: { selectsPerSec: 14, primaryKeyHitRatio: 0.2 },
   },
   {
     id: 'mark-cache',

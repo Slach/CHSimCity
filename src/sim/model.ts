@@ -36,8 +36,10 @@
 
 import {
   COMPRESS_BLOCK_BYTES,
+  currentTask,
   DEFAULT_KNOBS,
   INDEX_GRANULARITY,
+  MAX_READ_TASKS,
   N_KEEPERS,
   N_MERGE_SLOTS,
   N_NODES,
@@ -67,6 +69,7 @@ import type {
   QuerySim,
   QueueEntrySim,
   ReaderSim,
+  ReadTaskSim,
   SimApi,
   SimState,
   VolumeSim,
@@ -161,6 +164,19 @@ const MIN_BYTES_FOR_WIDE_PART = 10 * MIB
 const MERGE_MAX_BLOCK_ROWS = 8192
 
 /**
+ * `max_block_size` — rows a reader returns in one block, and ClickHouse's own
+ * default.
+ *
+ * It is what makes a packet on the read path a fixed size: a thread does not
+ * hand its whole mark range up at once, it streams blocks of this many rows. The
+ * stripes used to be sized by the thread's ENTIRE task instead, which on a full
+ * scan is millions of rows, so `flowSize` produced slabs long enough to lie
+ * across the yard — a picture of one enormous object moving, when what is
+ * happening is a great many small ones.
+ */
+const MAX_BLOCK_ROWS = 65409
+
+/**
  * Seconds an `outdated` part is retained before its directory is removed —
  * `old_parts_lifetime`.
  *
@@ -210,6 +226,37 @@ const QUEUE_CONCURRENCY = 8
  * presentation floor, not a claim about ClickHouse.
  */
 const MIN_QUERY_SECONDS = 0.14
+
+/**
+ * `merge_tree_min_rows_for_concurrent_read` — 163840 rows, which is 20 granules
+ * at the default `index_granularity`.
+ *
+ * It is the smallest amount of work the pool thinks is worth a second thread, so
+ * it decides both how many threads a query gets and how big a share each one is
+ * dealt. This is why a point lookup runs on ONE core however high `max_threads`
+ * is: there is nothing to parallelise, and starting eight threads to read twelve
+ * granules would cost more than reading them.
+ */
+const MIN_MARKS_FOR_CONCURRENT_READ = Math.ceil(163840 / INDEX_GRANULARITY)
+
+/**
+ * `merge_tree_min_read_task_size` — the floor on a thread's share, in marks.
+ *
+ * Without it a query that survived the indexes with thirty granules would be cut
+ * into eight two-granule tasks, and the bookkeeping would cost more than the
+ * read.
+ */
+const MIN_READ_TASK_MARKS = 8
+
+/**
+ * How many per-part analysis pods one probe leg draws at once.
+ *
+ * Analysis really is one task per selected part, in parallel, and a node here can
+ * hold a hundred selected parts. Drawing all of them would spend the entire frame
+ * budget on the cheapest step in the query. This bounds the DRAWING only: the
+ * query's `partsSelected` counts every part, and the tooltip says so.
+ */
+const ANALYSIS_PODS = 5
 
 /**
  * The modelled node hosts three tables. A real one hosts hundreds, and they all
@@ -317,14 +364,18 @@ export function createSim(bus: Bus): SimApi {
   }
 
   function makeReader(slot: number): ReaderSim {
+    const tasks: ReadTaskSim[] = []
+    // Allocated once, at boot. `assignReaders` runs on every SELECT, and a
+    // SELECT-heavy scenario runs dozens per second.
+    for (let i = 0; i < MAX_READ_TASKS; i++) tasks.push({ table: 0, part: -1, markBegin: 0, markEnd: 0, marksInPart: 0 })
     return {
       slot,
       state: 'idle',
-      table: 0,
-      part: -1,
-      marksInPart: 0,
-      markBegin: 0,
-      markEnd: 0,
+      tasks,
+      taskCount: 0,
+      marksTotal: 0,
+      stolenFrom: -1,
+      query: -1,
       marksDone: 0,
       column: 0,
       progress: 0,
@@ -1501,6 +1552,15 @@ export function createSim(bus: Bus): SimApi {
     prunePartitions: boolean
     usePrimaryKey: boolean
     useSkipIndex: number
+    /**
+     * Distinct GROUP BY keys each shard will end up with. 1 means a bare
+     * aggregate with no GROUP BY at all.
+     *
+     * This is what decides the size of the answer, because the default stage for
+     * a multi-shard query is `WithMergeableState`: the shard ships one row of
+     * aggregate state per group, not the rows it read.
+     */
+    groups: number
     sql: string
   }
 
@@ -1519,9 +1579,33 @@ export function createSim(bus: Bus): SimApi {
     if (pk) parts.push(`${keyCol} = …`)
     if (skipCol) parts.push(`${skipCol} = …`)
     const where = parts.length ? ` WHERE ${parts.join(' AND ')}` : ''
-    const sql = `SELECT count(), sum(…) FROM ${def.name}${where}`
 
-    return { prunePartitions: prune, usePrimaryKey: pk, useSkipIndex: skipIdx, sql }
+    /* WHAT THE ANSWER WILL COST, which is a different question from what the
+     * query will read.
+     *
+     * Compression ratio stands in for cardinality here, because it is the same
+     * property seen from the other side: a column ClickHouse compresses 30× is a
+     * column with few distinct values. So grouping by a well-compressed column
+     * gives a handful of groups, and grouping by a poorly-compressed one can give
+     * more groups than `group_by_two_level_threshold` — at which point the shard's
+     * hash table goes two-level and the states it ships carry bucket numbers. */
+    const roll = rng()
+    let groups = 1
+    let groupCol: string | null = null
+    if (roll > 0.35) {
+      const wide = roll > 0.82
+      const cands = def.columns.filter((c) => (wide ? c.ratio <= 5 : c.ratio > 8))
+      const col = cands.length > 0 ? cands[Math.floor(rng() * cands.length)] : def.columns[0]
+      groupCol = col.name
+      groups = wide
+        ? Math.round(60_000 + rng() * 900_000)
+        : Math.round(4 + rng() * 400)
+    }
+    const groupBy = groupCol ? ` GROUP BY ${groupCol}` : ''
+    const select = groupCol ? `${groupCol}, count(), sum(…)` : 'count(), sum(…)'
+    const sql = `SELECT ${select} FROM ${def.name}${where}${groupBy}`
+
+    return { prunePartitions: prune, usePrimaryKey: pk, useSkipIndex: skipIdx, groups, sql }
   }
 
   function startDistributedQuery(table: number): void {
@@ -1597,7 +1681,13 @@ export function createSim(bus: Bus): SimApi {
     const def = TABLES[table]
     const nt = n.tables[table]
 
-    /* --- 1. partition pruning ------------------------------------------- */
+    /* --- 1. partition pruning -------------------------------------------
+     * Everything in steps 1–4 happens at PLAN time, in `selectRangesToRead`,
+     * before there is a pipeline to run it in — so the predicate goes to the
+     * planner and not to the pool. Whole PARTS are what this step removes, by the
+     * partition key, the partition minmax index and column statistics, without
+     * opening one index file. */
+    flow(rid.queryToAnalysis(node), 1, 'query', 0.9)
     let partsSelected = 0
     let partsTotal = 0
     let granulesTotal = 0
@@ -1627,10 +1717,19 @@ export function createSim(bus: Bus): SimApi {
       const tightness = keyCol && keyCol.ratio > 20 ? 0.004 : keyCol && keyCol.ratio > 5 ? 0.02 : 0.09
       granulesAfterKey = Math.max(1, Math.round(granulesTotal * tightness * (0.6 + rng() * 0.8)))
     }
-    // The index probe carries the granules it had to consider, which is why a
-    // query with no usable key prefix sends a visibly bigger pod up the tower
-    // than one that lands on a narrow range.
-    flow(rid.probeIndex(node, table), 1, 'mark_read', flowSize(granulesTotal))
+    /* ONE POD PER PART, not one per table.
+     *
+     * `MergeTreeDataSelectExecutor` schedules one analysis task PER PART on its
+     * own thread pool and waits for all of them, so the honest picture is a
+     * handful of pods going up the rack at once — each one a part opening its own
+     * `primary.cidx`. The count is capped so a node holding a hundred selected
+     * parts does not spend the whole frame budget here; the query's own
+     * `partsSelected` still reports the truth. Each pod carries the granules THAT
+     * PART had to consider, which is why a query with no usable key prefix sends
+     * visibly bigger pods than one landing on a narrow range. */
+    const probes = Math.min(partsSelected, ANALYSIS_PODS)
+    const granulesPerPart = Math.max(1, Math.round(granulesTotal / partsSelected))
+    flow(rid.probeIndex(node, table), probes, 'mark_read', flowSize(granulesPerPart), 0.05)
 
     /* --- 3. skip indexes ------------------------------------------------ */
     let granulesAfterSkip = granulesAfterKey
@@ -1643,16 +1742,38 @@ export function createSim(bus: Bus): SimApi {
       const blocks = Math.ceil(granulesAfterKey / block)
       const survivingBlocks = Math.max(1, Math.round(blocks * (1 - idx.selectivity)))
       granulesAfterSkip = Math.min(granulesAfterKey, survivingBlocks * block)
-      flow(rid.probeSkip(node, table), 1, 'mark_read', flowSize(granulesAfterKey))
+      flow(
+        rid.probeSkip(node, table),
+        probes,
+        'mark_read',
+        flowSize(Math.max(1, Math.round(granulesAfterKey / partsSelected))),
+        0.05,
+      )
     }
 
     granulesAfterSkip = Math.max(1, Math.round(granulesAfterSkip * share))
 
-    /* --- 4. marks, and what the mark cache does about them -------------- */
+    /* The per-part answers coming back, and then ONE list going to the pool.
+     * The seam between planning and execution: after this pod the query is I/O,
+     * and nothing downstream ever consults an index again. */
+    flow(
+      rid.skipToAnalysis(node, table),
+      probes,
+      'mark_read',
+      flowSize(Math.max(1, Math.round(granulesAfterSkip / partsSelected))),
+      0.05,
+    )
+    flow(rid.rangesToPool(node), 1, 'mark_read', flowSize(granulesAfterSkip))
+
+    /* --- 4. marks, and what the mark cache does about them --------------
+     * The cache is TOUCHED here because the query's mark working set is known
+     * here, but nothing is drawn arriving at the pool: `.mrk3` is resolved by the
+     * thread that is about to seek, and the pod for it leaves the mark cache for
+     * a reader BAY in `startReader`. Index analysis, just above, used the index
+     * caches instead — a different pair entirely. */
     const marksNeeded = granulesAfterSkip * streams[table]
     const markBytes = marksNeeded * MARK_BYTES
     const markHit = touchCache(n.markCache, markBytes, markWorkingSet(node, table))
-    flow(rid.markToPool(node, table), 1, 'mark_read', flowSize(marksNeeded))
 
     /* --- 5. bytes, threads, and time ------------------------------------ */
     const rowsRead = granulesAfterSkip * INDEX_GRANULARITY
@@ -1669,7 +1790,15 @@ export function createSim(bus: Bus): SimApi {
       : false
     if (K.uncompressedCacheMib <= 0) n.uncompressedCache.misses++
 
-    const threads = clamp(Math.min(K.maxThreads, Math.ceil(granulesAfterSkip / 4)), 1, N_READ_THREADS)
+    // `max_threads` is a ceiling, not an allocation: what the pool actually uses
+    // is however many `merge_tree_min_rows_for_concurrent_read` shares the work
+    // divides into. An indexed lookup therefore lights one bay and a full scan
+    // lights all of them, with the same `max_threads`.
+    const threads = clamp(
+      Math.min(K.maxThreads, Math.ceil(granulesAfterSkip / MIN_MARKS_FOR_CONCURRENT_READ)),
+      1,
+      N_READ_THREADS,
+    )
 
     // The device read has to be paid for; a mark-cache miss adds a seek per
     // stream, and a decompression that the uncompressed cache could have
@@ -1706,7 +1835,16 @@ export function createSim(bus: Bus): SimApi {
       granulesAfterSkip,
       rowsRead: 0,
       bytesRead: 0,
+      /* What this shard will actually SEND: one row of aggregate state per group
+       * it saw. The shape's `GROUP BY` cardinality bounds it, and the rows read
+       * bound it too — a shard cannot report more groups than it has rows. This is
+       * the number that crosses the network at stage `WithMergeableState`, and the
+       * reason a distributed aggregate on a low-cardinality key is nearly free
+       * however much data it read. */
+      groups: Math.max(1, Math.min(shape.groups, rowsRead)),
       threads,
+      analysing: true,
+      analysisDuration: Math.min(duration * 0.35, 0.12),
       elapsed: 0,
       duration,
       // `max_memory_usage`: an aggregation holds one hash table per thread plus
@@ -1722,51 +1860,176 @@ export function createSim(bus: Bus): SimApi {
     // Also a statement and not data — the initiator forwards the SQL, not rows.
     if (node !== initiator) flow(rid.fanQuery(initiator, node), 1, 'query', 0.95)
 
-    /* --- hand the mark ranges to the pool ------------------------------- */
-    assignReaders(node, q)
+    /* NOT `assignReaders(node, q)` HERE.
+     *
+     * There is no pool yet. Analysis is still running — one task per part — and
+     * the pool is created from its result, so the threads are handed their queues
+     * in `tickQueries` when `analysing` goes false. Assigning them here drew
+     * threads reading granules that the skip index had not finished discarding. */
     return true
   }
 
+  /* The work list the index analysis hands the pool: one entry per part that
+   * still has marks to read. Allocated once — `assignReaders` runs on every
+   * SELECT, and the read-heavy scenarios run dozens per second.
+   *
+   * A node can hold more active parts than this; those are simply not dealt out,
+   * and the query's own `granulesAfterSkip` still reports every granule it will
+   * read. The window is on the DEAL, never on the counters. */
+  const WORK_PARTS = 256
+  const workSlot = new Int32Array(WORK_PARTS)
+  const workMarks = new Int32Array(WORK_PARTS) // marks in this part the query must read
+  const workTotal = new Int32Array(WORK_PARTS) // marks in the whole part
+  const workBegin = new Int32Array(WORK_PARTS) // where inside the part its surviving range starts
+
   /**
-   * `MergeTreeReadPool::fillPerThreadInfo`. Mark ranges are dealt out to the
-   * reader threads, and deliberately not evenly: the pool hands out the biggest
-   * tasks first so the threads finish at about the same moment. A pool that
-   * dealt evenly would leave one thread reading a huge part while the rest idle,
-   * which is the entire reason this class exists rather than a simple queue.
+   * `MergeTreeReadPool` — `fillPerThreadInfo` and `getTask`.
+   *
+   * What the pool receives is a LIST OF (part, mark ranges), and its job is to
+   * cut that list up, not to hand out parts. So a thread's workload is a handful
+   * of ranges that can come from several different parts — each with its own
+   * `primary.cidx` and its own skip-index files — and one part is normally being
+   * read by several threads at once. That is the fact this function exists to
+   * produce; a pool that gave one part to one thread would be a queue, and would
+   * stall on whichever thread drew the biggest part.
+   *
+   * Two real behaviours follow, and both are modelled:
+   *
+   *   - the deal walks the concatenated list, so a thread's share can start in
+   *     the middle of one part's range and end in the middle of another's;
+   *   - a thread with room comes back for what is left over rather than idling,
+   *     which is `getTask` stealing off the back of another thread's queue.
    */
   function assignReaders(node: number, q: QuerySim): void {
     const n = nodes[node]
     const nt = n.tables[q.table]
-    const active: PartSim[] = []
-    for (const p of nt.parts) if (p.state === 'active') active.push(p)
-    if (active.length === 0) return
 
+    /* --- the work list -------------------------------------------------- */
+    let w = 0
+    let marksSelectable = 0
+    for (const p of nt.parts) {
+      if (p.state !== 'active') continue
+      if (w >= WORK_PARTS) break
+      const total = Math.max(1, p.marks - 1)
+      workSlot[w] = p.slot
+      workTotal[w] = total
+      marksSelectable += total
+      w++
+    }
+    if (w === 0) return
+
+    /* Every part carries the WHOLE key range of the table — parts are sorted
+     * within themselves, not against each other — so a range predicate leaves a
+     * piece of nearly every part behind, roughly in proportion to its size. This
+     * is why merging parts speeds up a key lookup: fewer ranges to seek to, not
+     * fewer rows to read. */
+    let dealt = 0
+    for (let i = 0; i < w; i++) {
+      const share = Math.round((q.granulesAfterSkip * workTotal[i]) / marksSelectable)
+      const marks = clamp(share, 1, workTotal[i])
+      workMarks[i] = marks
+      // The surviving range is somewhere inside the part, not at its head.
+      workBegin[i] = Math.floor(rng() * (workTotal[i] - marks + 1))
+      dealt += marks
+    }
+
+    /* --- the deal -------------------------------------------------------
+     * `min_marks_per_thread = (sum_marks - 1) / threads + 1`: an even split of
+     * MARKS, floored by `merge_tree_min_read_task_size`. The unevenness a viewer
+     * sees comes from part boundaries and from stealing, not from the split. */
+    const perThread = Math.max(MIN_READ_TASK_MARKS, Math.ceil(dealt / q.threads))
+    let pi = 0 // cursor into the work list
+    let off = 0 // marks already taken out of workMarks[pi]
     let assigned = 0
+    let lastDealt = -1
     for (const r of n.readers) {
-      if (assigned >= q.threads) break
+      if (assigned >= q.threads || pi >= w) break
       if (r.state !== 'idle') continue
-      const part = active[Math.floor(rng() * active.length)]
-      const granules = Math.max(1, part.marks - 1)
-      const chunk = Math.max(1, Math.ceil(q.granulesAfterSkip / q.threads))
-      const begin = Math.floor(rng() * Math.max(1, granules - 1))
-      r.state = 'seeking'
-      r.table = q.table
-      r.part = part.slot
-      r.marksInPart = granules
-      r.markBegin = begin
-      r.markEnd = Math.min(granules, begin + chunk)
-      r.marksDone = 0
-      r.column = 0
-      r.progress = 0
-      r.markCacheHit = n.markCache.hitRatio > rng()
-      r.blockCacheHit = K.uncompressedCacheMib > 0 && n.uncompressedCache.hitRatio > rng()
-      readerQuery[node * N_READ_THREADS + r.slot] = q.id
-      readerDuration[node * N_READ_THREADS + r.slot] = q.duration
-      // The pod handed to a thread is that thread's OWN mark range, so the
-      // pool's uneven dealing — biggest task first — is visible as unequal pods.
-      flow(rid.poolToReader(node, r.slot), 1, 'mark_read', flowSize((r.markEnd - r.markBegin) * INDEX_GRANULARITY))
+      r.taskCount = 0
+      r.marksTotal = 0
+      r.stolenFrom = -1
+      let want = perThread
+      while (want > 0 && pi < w && r.taskCount < MAX_READ_TASKS) {
+        const avail = workMarks[pi] - off
+        if (avail <= 0) {
+          pi++
+          off = 0
+          continue
+        }
+        const take = Math.min(avail, want)
+        const task = r.tasks[r.taskCount++]
+        task.table = q.table
+        task.part = workSlot[pi]
+        task.marksInPart = workTotal[pi]
+        task.markBegin = workBegin[pi] + off
+        task.markEnd = task.markBegin + take
+        r.marksTotal += take
+        off += take
+        want -= take
+      }
+      if (r.marksTotal === 0) continue
+      startReader(node, r, q)
+      lastDealt = r.slot
       assigned++
     }
+
+    /* --- stealing ------------------------------------------------------- */
+    /* Work is left only when the threads that were dealt to filled their queues.
+     * A thread that still has room takes it rather than waiting, and records
+     * whose remainder it was — which is the difference between a pool and a
+     * static split, and the reason `max_threads` threads do not finish at
+     * `max_threads` different times. */
+    if (pi < w) {
+      for (const r of n.readers) {
+        if (pi >= w) break
+        if (readerQuery[node * N_READ_THREADS + r.slot] !== q.id) continue
+        if (r.taskCount >= MAX_READ_TASKS) continue
+        let stole = 0
+        while (pi < w && r.taskCount < MAX_READ_TASKS) {
+          const avail = workMarks[pi] - off
+          if (avail <= 0) {
+            pi++
+            off = 0
+            continue
+          }
+          const task = r.tasks[r.taskCount++]
+          task.table = q.table
+          task.part = workSlot[pi]
+          task.marksInPart = workTotal[pi]
+          task.markBegin = workBegin[pi] + off
+          task.markEnd = task.markBegin + avail
+          r.marksTotal += avail
+          stole += avail
+          off += avail
+        }
+        if (stole > 0 && r.slot !== lastDealt) r.stolenFrom = lastDealt
+      }
+    }
+  }
+
+  /** Put one thread to work on the queue `assignReaders` just filled for it. */
+  function startReader(node: number, r: ReaderSim, q: QuerySim): void {
+    const n = nodes[node]
+    r.state = 'seeking'
+    r.marksDone = 0
+    r.column = 0
+    r.progress = 0
+    r.query = q.id
+    r.markCacheHit = n.markCache.hitRatio > rng()
+    r.blockCacheHit = K.uncompressedCacheMib > 0 && n.uncompressedCache.hitRatio > rng()
+    readerQuery[node * N_READ_THREADS + r.slot] = q.id
+    // The reading, not the whole query: planning is already over by the time a
+    // thread exists, so a bay's bar must not include it.
+    readerDuration[node * N_READ_THREADS + r.slot] = Math.max(0.05, q.duration - q.analysisDuration)
+    /* Before it can seek, the thread needs the `.mrk3` entry — from the MarkCache,
+     * per part and per stream, and this is the only step that touches it. */
+    flow(rid.markToReader(node, r.slot), 1, 'mark_read', flowSize(r.marksTotal))
+    /* The pod handed to a thread is the SIZE OF ITS QUEUE, so the pool's uneven
+     * dealing is visible as unequal pods arriving at the bays. Its bulk is a
+     * count of MARKS, like every other pod on the analysis legs — what travels
+     * here is a task list, and sizing it by the rows those marks stand for made a
+     * full scan's task list bigger than the data it describes. */
+    flow(rid.poolToReader(node, r.slot), 1, 'mark_read', flowSize(r.marksTotal))
   }
 
   const readerQuery = new Int32Array(N_NODES * N_READ_THREADS).fill(-1)
@@ -1798,18 +2061,29 @@ export function createSim(bus: Bus): SimApi {
       else if (p < 0.94) r.state = 'filtering'
       else r.state = 'aggregating'
 
-      r.marksDone = Math.round((r.markEnd - r.markBegin) * p)
+      r.marksDone = Math.round(r.marksTotal * p)
       r.column = Math.min(TABLES[0].columns.length - 1, Math.floor(p * 4))
 
       if (r.state === 'reading' && rng() < dt * 8) {
-        // One column stripe out of the range this thread is on, so a thread with
-        // a big range sends visibly bigger stripes than one with a small range.
-        flow(rid.readerToResult(node), 1, 'column_read', flowSize(((r.markEnd - r.markBegin) * INDEX_GRANULARITY) / 4))
+        /* The stripe leaves the PART the thread is on right now, and each thread
+         * has its own lane back. Before this there was one route per node, so
+         * eight threads reading eight different parts sent everything up a single
+         * duct — which is what made the pool look like a funnel with one input
+         * instead of the many-to-many it is. */
+        const task = r.tasks[currentTask(r)]
+        const marks = Math.max(1, task.markEnd - task.markBegin)
+        // One BLOCK, not one task: `max_block_size` rows, or the whole range if
+        // it is smaller than that. A stripe is a block leaving the reader.
+        const rows = Math.min(MAX_BLOCK_ROWS, marks * INDEX_GRANULARITY)
+        flow(rid.readerToResult(node, r.slot), 1, 'column_read', flowSize(rows))
       }
 
       if (p >= 1) {
         r.state = 'idle'
-        r.part = -1
+        r.taskCount = 0
+        r.marksTotal = 0
+        r.stolenFrom = -1
+        r.query = -1
         r.progress = 0
         r.marksDone = 0
         readerStateT[k] = 0
@@ -1823,6 +2097,16 @@ export function createSim(bus: Bus): SimApi {
     for (let i = n.queries.length - 1; i >= 0; i--) {
       const q = n.queries[i]
       q.elapsed += dt
+      /* PLANNING FIRST, then reading. While `analysing` the query is in
+       * `selectRangesToRead`, so no thread has been handed anything and no row
+       * has been read; the pool is created from the analysis result, which is the
+       * moment the threads get their queues. */
+      if (q.analysing) {
+        if (q.elapsed < q.analysisDuration) continue
+        q.analysing = false
+        assignReaders(node, q)
+        continue
+      }
       const p = clamp01(q.elapsed / q.duration)
       q.rowsRead = Math.round(q.granulesAfterSkip * INDEX_GRANULARITY * p)
       q.bytesRead = Math.round(q.granulesAfterSkip * INDEX_GRANULARITY * p * 12)
@@ -1834,21 +2118,30 @@ export function createSim(bus: Bus): SimApi {
         // why pointing every client at one hostname concentrates load that the
         // data distribution alone would have spread.
         const d = nodes[q.initiator].distributed
+        /* WHAT CROSSES THE WIRE IS THE STATE, NOT THE ROWS.
+         *
+         * The default stage for a multi-shard query is `WithMergeableState`: the
+         * shard finishes its own aggregation and ships a non-finalised state, one
+         * row per group. So the pod's bulk is `groups`, and the bytes counted are
+         * the state's bytes — roughly a key and an accumulator per group.
+         *
+         * This used to be `flowSize(q.rowsRead)`, which drew a billion-row scan
+         * dragging a billion rows across the network, and the model's own
+         * `node.resultmerge` doc contradicted it on screen. */
+        const stateBytes = q.groups * 48
         if (node !== q.initiator) {
-          flow(rid.fanResult(node, q.initiator), 1, 'result', flowSize(q.rowsRead))
+          flow(rid.fanResult(node, q.initiator), 1, 'result', flowSize(q.groups))
           // Bytes over the wire, which is what `bytesFromRemote` means. The
-          // initiator's own share never crosses it.
-          d.bytesFromRemote += q.bytesRead
+          // initiator's own share never crosses it — `prefer_localhost_replica`
+          // runs it in-process, at the same stage, with no socket.
+          d.bytesFromRemote += stateBytes
         }
-        d.rowsMerged += q.rowsRead
+        d.rowsMerged += q.groups
         d.activity = Math.min(1, d.activity + 0.2)
-        // The answer going home is as long as the answer: flowSize of the rows,
-        // exactly like the partial results above, so a query that touched ten
-        // times the data visibly brings home a longer train. SIMPLIFICATION:
-        // the model does not track each query's result cardinality, so rows
-        // READ stand in for rows returned — a real aggregate would send back a
-        // handful of rows however many it scanned.
-        flow(rid.nodeToClient(q.initiator), 1, 'result', flowSize(q.rowsRead))
+        // And the answer home is the merged, finalised result: still one row per
+        // group, so an aggregate that scanned a billion rows leaves by the same
+        // door as one that scanned a thousand.
+        flow(rid.nodeToClient(q.initiator), 1, 'result', flowSize(q.groups))
         queryMsAcc += q.duration * 1000
         queryMsCount++
         n.queries.splice(i, 1)
@@ -3251,7 +3544,10 @@ export function createSim(bus: Bus): SimApi {
       }
       for (const r of n.readers) {
         r.state = 'idle'
-        r.part = -1
+        r.taskCount = 0
+        r.marksTotal = 0
+        r.stolenFrom = -1
+        r.query = -1
         r.progress = 0
         r.marksDone = 0
       }

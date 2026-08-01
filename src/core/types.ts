@@ -48,6 +48,16 @@ export const INDEX_GRANULARITY = 8192
  */
 export const N_READ_THREADS = 8
 
+/**
+ * Mark-range tasks one reader thread can hold at once.
+ *
+ * A real thread's queue is unbounded; this is the presentation's window on it,
+ * for the same reason the parts yard is a window. Five is enough to show the
+ * fact that matters — one thread's work is pieces of SEVERAL parts — without the
+ * bays turning into a thicket.
+ */
+export const MAX_READ_TASKS = 5
+
 /** Background merge slots per node — `background_pool_size`. */
 export const N_MERGE_SLOTS = 4
 
@@ -450,23 +460,57 @@ export interface MutationSim {
 
 export type ReaderState = 'idle' | 'seeking' | 'reading' | 'decompressing' | 'filtering' | 'aggregating'
 
-export interface ReaderSim {
-  slot: number
-  state: ReaderState
-  /** Which table the task belongs to. A mark range means nothing without it. */
+/**
+ * One unit of work out of `MergeTreeReadPool`: a mark range inside ONE part.
+ *
+ * This is the whole difference between the pool and a queue of parts. The range
+ * is LOCAL TO THAT PART — mark 100 of one part has nothing to do with mark 100
+ * of another — so `table` and `part` travel with every range, and a thread that
+ * holds four of these is reading four different parts, each through its own
+ * `primary.cidx` and its own skip-index files.
+ */
+export interface ReadTaskSim {
   table: number
-  /** Which part this thread is currently reading, by slot. -1 = none. */
-  part: number
   /**
-   * Mark range handed out by the pool: [begin, end). The numbers are LOCAL TO
-   * THAT PART — mark 100 of one part has nothing to do with mark 100 of
-   * another — which is why `part` and `table` travel with them.
+   * Part slot in the yard window, or -1 when the part is beyond it. A task on a
+   * part with no slot is fully simulated; it simply has nothing to point at.
    */
+  part: number
   markBegin: number
   markEnd: number
   /** Marks in the whole part, so the range can be drawn as a fraction of it. */
   marksInPart: number
-  /** Marks consumed so far inside the range. */
+}
+
+export interface ReaderSim {
+  slot: number
+  state: ReaderState
+  /**
+   * The thread's own queue: `tasks[0 … taskCount)`. Preallocated to
+   * `MAX_READ_TASKS` and refilled in place, because a query assigns readers and
+   * must not make the model allocate per SELECT.
+   */
+  tasks: ReadTaskSim[]
+  taskCount: number
+  /** Marks this thread was given, summed over its tasks. */
+  marksTotal: number
+  /**
+   * The thread this one took its last task from, or -1 if it was dealt its own.
+   *
+   * `MergeTreeReadPool::getTask` lets a thread whose queue has run dry take work
+   * off the back of another thread's queue, which is why the pool does not end
+   * up waiting on whichever thread drew the biggest part.
+   */
+  stolenFrom: number
+  /**
+   * `query_id` of the query this queue belongs to, or -1 when idle.
+   *
+   * Threads of the SAME query never hold overlapping ranges — the deal cuts one
+   * list up. Threads of different queries routinely do, because two queries read
+   * the same parts.
+   */
+  query: number
+  /** Marks consumed so far, across the whole queue. */
   marksDone: number
   /** Which column of the part this thread is on. */
   column: number
@@ -476,6 +520,22 @@ export interface ReaderSim {
   markCacheHit: boolean
   /** Did the last block come out of the uncompressed cache? */
   blockCacheHit: boolean
+}
+
+/**
+ * Which of a thread's tasks it is on right now, by how many marks it has read.
+ *
+ * A thread works its queue in order, so this is a derivation of `marksDone` and
+ * not a second piece of state — both the sim's column stripes and the world's
+ * beams have to agree about it, which they cannot do if each keeps its own idea.
+ */
+export function currentTask(r: ReaderSim): number {
+  let acc = 0
+  for (let i = 0; i < r.taskCount; i++) {
+    acc += r.tasks[i].markEnd - r.tasks[i].markBegin
+    if (r.marksDone < acc) return i
+  }
+  return Math.max(0, r.taskCount - 1)
 }
 
 export interface CacheSim {
@@ -519,10 +579,31 @@ export interface QuerySim {
   granulesAfterSkip: number
   rowsRead: number
   bytesRead: number
+  /**
+   * Rows in the partial aggregate state this shard will send back: one per GROUP
+   * BY key it saw, NOT the rows it read.
+   *
+   * The default stage for a multi-shard `GROUP BY` is `WithMergeableState`, so a
+   * shard aggregates its own data and ships a non-finalised state; what crosses
+   * the network is proportional to the number of GROUPS. That is why a
+   * distributed aggregate on a low-cardinality key is nearly free however much
+   * data it read.
+   */
+  groups: number
   /** Reader threads assigned. */
   threads: number
+  /**
+   * True while index analysis is still running — before the pool exists.
+   *
+   * `selectRangesToRead` finishes during planning; `initializePipeline` only
+   * consumes its memoised result. So this phase is over before a single reader
+   * thread has been handed anything, and no thread ever consults an index.
+   */
+  analysing: boolean
   elapsed: number
   duration: number
+  /** Seconds of `duration` spent on index analysis, one task per part. */
+  analysisDuration: number
   /** Peak memory this query has held. */
   memoryBytes: number
   /** True once the initiator has all shards' partial results. */
@@ -721,9 +802,16 @@ export interface DistributedSim {
   readShard: number[]
   /** How many SELECTs this server is currently fanning out as initiator. */
   fanOut: number
-  /** Rows this server has merged from other shards' partial results. */
+  /**
+   * Rows of partial aggregate STATE this server has merged, its own shard's
+   * included — one per group, not one per row read.
+   *
+   * At stage `WithMergeableState` a shard finishes its own aggregation and ships
+   * the non-finalised state, so this counter is the size of the answers being
+   * combined and is unrelated to how much data they were computed from.
+   */
   rowsMerged: number
-  /** Bytes this server has read from remote shards. */
+  /** Bytes of that state this server has read from REMOTE shards. */
   bytesFromRemote: number
   /** SELECTs the application has initiated here since boot. */
   queriesInitiated: number
