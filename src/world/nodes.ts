@@ -934,7 +934,14 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
 
     /* ---- pick proxies and registration --------------------------------- */
 
-    proxy(built, 'island', 0, 20, 0, CITY.node.w, 40, CITY.node.d)
+    /* A low slab, NOT a box over the whole island: this proxy means "the
+     * click landed on the island itself". At 40 units tall it was hit before
+     * every building on the plate — the raycaster returns the nearest surface,
+     * and the box's top face was nearer than any roof — so clicking the yard,
+     * the strip or a shed from above selected the server instead. The slab
+     * keeps the empty plate selecting the island while everything standing on
+     * it wins its own click. */
+    proxy(built, 'island', 0, 1, 0, CITY.node.w, 10, CITY.node.d)
     proxy(built, 'yard', 0, Y.baseY + Y.maxRise / 2, 0, Y.deckW, Y.maxRise + 4, Y.deckD)
     proxy(built, 'insertdock', 0, 6, LOCAL.insertDock[2], 96, 14, 22)
     proxy(built, 'primaryindex', LOCAL.primaryIndex[0], idxH / 2, LOCAL.primaryIndex[2], 9, idxH, 9)

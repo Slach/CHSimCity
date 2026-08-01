@@ -102,6 +102,7 @@ async function boot(): Promise<void> {
     quality: gfx.quality,
     theme,
     register: (def: ComponentDef) => registry.register(def),
+    alias: (obj, id) => registry.alias(obj, id),
     flow: (req: FlowRequest) => bus.emit('flow', req),
   }
 
@@ -131,7 +132,7 @@ async function boot(): Promise<void> {
   const flows = createFlows(scene, bus, gfx.quality, theme)
   const labels = createLabels(labelsRoot, registry, bus)
   scene.add(labels.group)
-  const picker = createPicker({ dom: renderer.domElement, camera, registry, bus, theme, flows })
+  const picker = createPicker({ dom: renderer.domElement, camera, registry, bus, theme, flows, roads })
   scene.add(picker.group)
 
   await progress(BOOT_STEPS.console)

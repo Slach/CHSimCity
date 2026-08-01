@@ -540,24 +540,26 @@ export function createSim(bus: Bus): SimApi {
    * Packet bulk from a row count. This is the ONLY way a `size` should be
    * chosen: a packet's volume is the batch it is carrying, and nothing else.
    *
-   * Logarithmic for the same reason `partHeight` is: the model moves batches
-   * from a hundred rows to tens of millions, and a linear scale makes everything
-   * below the top of that range a single pixel.
+   * The unit is the DECADE: size = log10(rows) − 2, floored at 100 rows and
+   * clamped just above the top of the `insertBlockRows` knob (2,000,000). The
+   * engine stretches the pod's length ×2.5 per decade (see engine/flows.ts) —
+   * ×10 rows = ×2.5 train — so the knob's whole 100 → 2M range reads as
+   * roughly half a world unit up to a ~26-unit freight run.
    *
-   * CALIBRATED AGAINST THE KNOB, not against the data range, and that is the
-   * whole trick. `insertBlockRows` spans 100 to 2,000,000 — over four decades —
-   * and the default sits at 100,000. A gentle slope put the default two thirds
-   * of the way up the curve, so RAISING the knob, which is the lesson people
-   * come to this control for, changed almost nothing on screen. The slope is
-   * therefore steep enough that each decade is clearly a different pod, and the
-   * bottom simply floors: below a few thousand rows the lesson is carried by how
-   * MANY pods there are and by the yard filling up, not by any one of them.
+   *   100 → 0   1k → 1   10k → 2   100k → 3   1M → 4   2M → 4.3
    *
-   *   1k → 0.55 (floor)   10k → 1.31   100k → 2.26   1M → 3.17   2M → 3.5
+   * CALIBRATED AGAINST THE KNOB, not against the data range. Two earlier
+   * curves failed here: a gentle slope put the 100k default two thirds of the
+   * way up, so raising the knob — the lesson this control exists for — changed
+   * almost nothing on screen; and a floor at 1k made 100-row INSERTs identical
+   * to 1k ones, hiding exactly the difference the "batch your inserts" story
+   * turns on. Length rather than girth because girth is capped by the duct the
+   * pod rides in (ROAD_RADIUS, engine/roads.ts): four decades of batch cannot
+   * fit in a cross-section, but a train can always get longer.
    */
   function flowSize(rows: number): number {
-    if (!(rows > 0)) return 0.55
-    return clamp(0.55 + (Math.log10(rows) - 3.2) * 0.95, 0.55, 3.6)
+    if (!(rows > 0)) return 0
+    return clamp(Math.log10(rows) - 2, 0, 4.4)
   }
 
   function flow(route: string, count: number, kind: FlowKind, size?: number, stagger?: number): void {
@@ -579,6 +581,8 @@ export function createSim(bus: Bus): SimApi {
 
   let quorumFailures = 0
   let quorumWarnT = -100
+  /** Rate limit on `Code: 279`, which the queue's retry loop would otherwise repeat. */
+  let connWarnT = -100
   let asyncLossWarnT = -100
   let tooManyPartsWarnT = -100
   let readOnlyWarnT = -100
@@ -962,10 +966,15 @@ export function createSim(bus: Bus): SimApi {
    * THE DISTRIBUTED TABLE — ON EVERY SERVER
    *
    * A `Distributed` table stores nothing. On INSERT it evaluates the sharding
-   * expression per row, splits the block, and either forwards each piece
-   * immediately (`distributed_foreground_insert = 1`) or spools it to local disk
-   * and forwards it in the background. On SELECT it rewrites the query for one
-   * replica of each shard, sends it, and merges the partial results.
+   * expression per row, splits the block, and delivers each piece as an INSERT
+   * into the underlying MergeTree table on one replica of its shard — never
+   * into the remote server's own Distributed table. Its OWN shard's piece is
+   * written locally right away in either mode (`prefer_localhost_replica`);
+   * the other shards' pieces go over the wire immediately
+   * (`distributed_foreground_insert = 1`) or are parked in the background
+   * INSERT queue on its own disk (`= 0`, the default) and flushed later. On
+   * SELECT it rewrites the query for one replica of each shard, sends it, and
+   * merges the partial results.
    *
    * There is no initiator NODE. The DDL runs on every server, so all four have
    * the table and all four can do this; the initiator of a given statement is
@@ -1097,37 +1106,60 @@ export function createSim(bus: Bus): SimApi {
         toast('Code: 210. Connection refused — no server is reachable', 'warn', 4000)
         break
       }
-      const d = nodes[init].distributed
       const table = weightedPick(insertWeights, rng)
       const rows = K.insertBlockRows
-      const blockId = blockSeq++
-      shardBlock(init, rows, blockId)
       noteClientStatement(init)
       state.clients.lastInsertTarget = init
-      d.insertsInitiated++
+      // Counted at the CONNECTION, not at arrival: which server initiates is
+      // the client's decision and it is made here, while the freight's other
+      // consequences all wait for the corridor.
+      nodes[init].distributed.insertsInitiated++
       insertCountAcc++
       // One pod, as big as the batch. `insertBlockRows` is the knob the whole
       // "batch your inserts" lesson turns on, and this is where turning it down
       // becomes visible as a swarm of small pods instead of one large one.
       flow(rid.clientToNode(init), 1, 'insert', flowSize(rows))
-      d.activity = Math.min(1, d.activity + 0.3)
+      /* Nothing else happens yet. The block is IN FLIGHT: the split, the
+       * server's counters and the ok all wait until the freight has visibly
+       * reached the Distributed table — a pod that vanishes into the door
+       * while its consequences started seconds ago teaches nothing. */
+      inFlight.push({ init, table, rows, due: state.t + CORRIDOR_S })
+    }
 
-      for (let s = 0; s < N_SHARDS; s++) {
-        const r = Math.round(shardRows[s])
-        if (r <= 0) continue
-        d.rowsToShard[s] += r
-        if (K.distributedInsert === 'foreground') {
-          // The INSERT does not return until every shard has the data. Slower,
-          // and the only mode in which a client learns that a shard is down.
-          deliverToShard(init, s, table, r)
-        } else {
-          // Spooled: `data/<cluster>/shard<N>_replica<M>/*.bin` on the disk of
-          // the server the client reached, flushed by its background thread.
-          d.pendingBlocks[s]++
-          d.pendingBytes[s] += r * rowCompressed[table]
-          spool[init][s].push({ table, rows: r, due: state.t + 0.25 + rng() * 0.35 })
-        }
+    // Statements whose freight has just reached the initiator's door.
+    for (let i = inFlight.length - 1; i >= 0; i--) {
+      if (inFlight[i].due > state.t) continue
+      const st = inFlight[i]
+      inFlight[i] = inFlight[inFlight.length - 1]
+      inFlight.pop()
+      // The server died while the statement was in flight: the connection died
+      // with it, and what the client's retry policy does next is its business.
+      if (nodes[st.init].status === 'down') continue
+      splitAtDistributed(st.init, st.table, st.rows)
+    }
+
+    // Forwarded blocks whose wire crossing has just ended. They arrive at the
+    // receiver's insert dock — the sender was inserting into the underlying
+    // MergeTree table directly — so no Distributed table is involved here.
+    for (let i = onWire.length - 1; i >= 0; i--) {
+      const b = onWire[i]
+      if (b.due > state.t) continue
+      // The receiver is down: the block stays on the sender's side and the
+      // send is retried — a background distributed send really does retry.
+      if (nodes[b.node].status === 'down') continue
+      onWire[i] = onWire[onWire.length - 1]
+      onWire.pop()
+      /* `insert_quorum` is re-checked where the block lands, because the shard
+       * may have lost a replica while this block was on the wire. The model
+       * refuses the write outright so the lesson stays clean; a real server
+       * can be uglier — the part may be written and the client told
+       * `Code: 319. Unknown status of insert`. */
+      const need = quorumRequired()
+      if (need > 0 && liveReplicas(b.shard) < need) {
+        quorumFailures++
+        continue
       }
+      dockBlock(b.node, b.table, b.rows)
     }
 
     // The background spool flush, per server. A server that is down flushes
@@ -1139,10 +1171,21 @@ export function createSim(bus: Bus): SimApi {
         for (let s = 0; s < N_SHARDS; s++) {
           const q = spool[n][s]
           while (q.length > 0 && q[0].due <= state.t) {
-            const item = q.shift()!
+            const item = q[0]
+            if (!deliverToShard(n, s, item.table, item.rows, 'spool')) {
+              /* The real queue NEVER drops a file. A failed send raises
+               * `error_count` and the directory backs off exponentially —
+               * `distributed_background_insert_sleep_time_ms` (100 ms) ×
+               * 2^error_count, capped at 30 s — then tries again. One flat
+               * nudge stands in for that curve at this timescale; what must
+               * survive is that the file stays, so `data_files` keeps telling
+               * the truth while the destination is refusing. */
+              item.due = state.t + 1.5 + rng() * 1.5
+              break
+            }
+            q.shift()
             d.pendingBlocks[s] = Math.max(0, d.pendingBlocks[s] - 1)
             d.pendingBytes[s] = Math.max(0, d.pendingBytes[s] - item.rows * rowCompressed[item.table])
-            deliverToShard(n, s, item.table, item.rows)
           }
         }
       }
@@ -1152,7 +1195,89 @@ export function createSim(bus: Bus): SimApi {
     state.clients.activity = damp(state.clients.activity, 0, 2.4, dt)
   }
 
-  /** `data/<cluster>/shard<N>_replica<M>/` — per server, then per shard. */
+  /* Roughly the client corridor's travel time at its route speed, so the
+   * split happens as the freight arrives. Approximate on purpose: matching
+   * the animation exactly would couple the model to world geometry. */
+  const CORRIDOR_S = 3.4
+  /** Same idea for the server-to-server arcs; they vary by pair, this is the middle. */
+  const WIRE_S = 2.6
+  /** INSERT statements still visibly travelling the client corridor. */
+  const inFlight: { init: number; table: number; rows: number; due: number }[] = []
+  /** Forwarded blocks still visibly crossing a server-to-server arc. */
+  const onWire: { node: number; shard: number; table: number; rows: number; due: number }[] = []
+
+  /**
+   * The block has reached the initiator's `Distributed` table: NOW the
+   * sharding expression runs, one slice per shard leaves the building — down
+   * to this server's own dock, or over the wire to the other shard — and the
+   * ok goes back to the client. The ok departs AT the split, not at the far
+   * end of the writes: with `distributed_foreground_insert = 0` (the default;
+   * the setting was called `insert_distributed_sync` before 23.10) that
+   * really is all the client waits for — except its OWN shard's slice, which
+   * `prefer_localhost_replica` writes synchronously even then.
+   */
+  function splitAtDistributed(init: number, table: number, rows: number): void {
+    const d = nodes[init].distributed
+    const blockId = blockSeq++
+    shardBlock(init, rows, blockId)
+    d.activity = Math.min(1, d.activity + 0.3)
+
+    for (let s = 0; s < N_SHARDS; s++) {
+      const r = Math.round(shardRows[s])
+      if (r <= 0) continue
+      d.rowsToShard[s] += r
+      if (K.distributedInsert === 'foreground' || s === shardOf(init)) {
+        /* Foreground: the INSERT does not return until every shard has the
+         * data — slower, and the only mode in which a client learns that a
+         * shard is down.
+         *
+         * The initiator's OWN shard takes this path in BOTH modes:
+         * `prefer_localhost_replica` (on by default) writes that slice into
+         * the local table right now, synchronously, even with
+         * `distributed_foreground_insert = 0`. It never enters the queue —
+         * only the slices bound for OTHER shards are deferred. A "background"
+         * INSERT is therefore partly synchronous. */
+        deliverToShard(init, s, table, r, 'dist')
+      } else {
+        // Parked: a .bin file in `data/<database>/<table>/shard<N>_all_replicas/`
+        // on the disk of the server the client reached — the directory that
+        // `system.distribution_queue` reports — flushed by a background thread.
+        d.pendingBlocks[s]++
+        d.pendingBytes[s] += r * rowCompressed[table]
+        spool[init][s].push({ table, rows: r, due: state.t + 0.25 + rng() * 0.35 })
+        flow(rid.distToSpool(init), 1, 'insert', flowSize(r))
+      }
+    }
+    /* The INSERT's answer is an ok, not data: a short pod however large the
+     * batch was. That asymmetry — freight up the corridor, a receipt back
+     * down it — IS the lesson, so the size is a constant near the floor. */
+    flow(rid.nodeToClient(init), 1, 'result', 0.2)
+  }
+
+  /**
+   * `node`'s own Distributed table just split a block, and this slice belongs
+   * to `node`'s own shard: it walks from the front door down to the dock of
+   * the real table. Only that case — a forwarded slice coming off the wire
+   * arrives AT the dock (`fan.insert.*` and `spool.flush.*` end there), because
+   * the sender inserted into the underlying MergeTree table directly and the
+   * receiving server's Distributed table never saw it.
+   */
+  function landBlock(node: number, table: number, rows: number): void {
+    flow(rid.distToDock(node), 1, 'insert', flowSize(rows))
+    dockBlock(node, table, rows)
+  }
+
+  /** The slice is at `node`'s insert dock, however it got there: write it. */
+  function dockBlock(node: number, table: number, rows: number): void {
+    if (K.asyncInsert) queueAsyncInsert(node, table, rows)
+    else writeBlock(node, table, rows)
+  }
+
+  /* The background INSERT queue — what `system.distribution_queue` reports.
+   * Per server (it lives on the initiator's own disk), then per destination
+   * shard. The real thing is one directory of .bin files per destination under
+   * `data/<database>/<table>/`; the model keeps rows-per-shard, which is the
+   * same information at this scale. */
   const spool: { table: number; rows: number; due: number }[][][] = []
   for (let n = 0; n < N_NODES; n++) {
     const perShard: { table: number; rows: number; due: number }[][] = []
@@ -1184,11 +1309,31 @@ export function createSim(bus: Bus): SimApi {
     }
   }
 
-  function deliverToShard(from: number, shard: number, table: number, rows: number): void {
-    const node = pickReplica(shard, true)
+  /**
+   * Send one shard's slice to one live replica of that shard, straight into
+   * the underlying MergeTree table there. `origin` is which building the slice
+   * physically leaves — the Distributed table itself (a foreground send, or
+   * the local short-cut) or the background queue (a flush) — and it decides
+   * which duct the packet rides, nothing else.
+   *
+   * Returns whether the slice was handed over. `false` means it was NOT:
+   * a foreground caller treats that as the statement's error, the queue
+   * flush treats it as "keep the file and retry later".
+   */
+  function deliverToShard(from: number, shard: number, table: number, rows: number, origin: 'dist' | 'spool'): boolean {
+    /* `prefer_localhost_replica` (on by default): a sender that is itself a
+     * replica of the target shard writes the slice to ITSELF — a plain local
+     * insert, no connection pool, and therefore NO FAILOVER. Even read-only:
+     * the slice still goes to this server and `writeBlock` refuses it there
+     * with the real `Code: 242`, exactly as a direct local INSERT would fail.
+     * It does not fall back to the sibling replica or to the queue. */
+    const node = shardOf(from) === shard ? from : pickReplica(shard, true)
     if (node < 0) {
-      toast(`Code: 279. All connection tries failed for shard ${shard + 1}`, 'warn', 5000)
-      return
+      if (state.t - connWarnT > 12) {
+        connWarnT = state.t
+        toast(`Code: 279. All connection tries failed for shard ${shard + 1}`, 'warn', 5000)
+      }
+      return false
     }
 
     /* `insert_quorum` is what turns a replica loss from a non-event into a write
@@ -1207,16 +1352,26 @@ export function createSim(bus: Bus): SimApi {
           6000,
         )
       }
-      return
+      return false
     }
 
-    // Over the wire only when it is going to a DIFFERENT server. A server that
-    // holds the shard it just hashed a row to writes it locally, with no
-    // network hop at all — one of the few genuine wins of writing through a
-    // node that is also a data node, which in this cluster is all of them.
-    if (node !== from) flow(rid.fanInsert(from, node), 1, 'insert', flowSize(rows))
-    if (K.asyncInsert) queueAsyncInsert(node, table, rows)
-    else writeBlock(node, table, rows)
+    // Over the wire only when it is going to a DIFFERENT server. The wire ends
+    // at the RECEIVER'S INSERT DOCK: the sender is inserting into the
+    // underlying MergeTree table over its connection, and the receiving
+    // server's Distributed table plays no part in it. The forwarded copy
+    // becomes a part only when it comes OFF the wire (see onWire), so the
+    // receiving yard never grows a tower before the pod that carries it has
+    // visibly arrived.
+    if (node !== from) {
+      flow(origin === 'spool' ? rid.spoolFlush(from, node) : rid.fanInsert(from, node), 1, 'insert', flowSize(rows))
+      onWire.push({ node, shard, table, rows, due: state.t + WIRE_S })
+    } else {
+      // `origin` can only be 'dist' here: the local shard's slice never
+      // enters the queue (see splitAtDistributed), and a queue directory for
+      // a REMOTE shard cannot flush to this server.
+      landBlock(node, table, rows)
+    }
+    return true
   }
 
   /* ======================================================================
@@ -1614,12 +1769,13 @@ export function createSim(bus: Bus): SimApi {
         }
         d.rowsMerged += q.rowsRead
         d.activity = Math.min(1, d.activity + 0.2)
-        // The answer to an aggregate is a handful of rows however many were
-        // scanned to produce it. A constant, therefore — the asymmetry between a
-        // huge read and a tiny answer is the shape of every analytical query —
-        // but a constant big enough to see on the longest route in the model.
-        // See the note on the outbound statement above.
-        flow(rid.nodeToClient(q.initiator), 1, 'result', 1.15)
+        // The answer going home is as long as the answer: flowSize of the rows,
+        // exactly like the partial results above, so a query that touched ten
+        // times the data visibly brings home a longer train. SIMPLIFICATION:
+        // the model does not track each query's result cardinality, so rows
+        // READ stand in for rows returned — a real aggregate would send back a
+        // handful of rows however many it scanned.
+        flow(rid.nodeToClient(q.initiator), 1, 'result', flowSize(q.rowsRead))
         queryMsAcc += q.duration * 1000
         queryMsCount++
         n.queries.splice(i, 1)
@@ -3147,6 +3303,7 @@ export function createSim(bus: Bus): SimApi {
     mergeLevel.clear()
     quorumFailures = 0
     quorumWarnT = -100
+    connWarnT = -100
     asyncLossWarnT = -100
     tooManyPartsWarnT = -100
     readOnlyWarnT = -100

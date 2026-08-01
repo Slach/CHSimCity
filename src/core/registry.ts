@@ -12,6 +12,9 @@ export class Registry {
   private byId = new Map<string, ComponentDef>()
   private byObject = new Map<THREE.Object3D, ComponentDef>()
   private ordered: ComponentDef[] = []
+  private aliased: THREE.Object3D[] = []
+  /** Bumped on every register/alias — the picker keys its candidate cache on this. */
+  version = 0
 
   register(def: ComponentDef): void {
     if (this.byId.has(def.id)) {
@@ -24,6 +27,28 @@ export class Registry {
     this.byObject.set(def.object, def)
     this.ordered.push(def)
     def.object.userData.componentId = def.id
+    this.version++
+  }
+
+  /**
+   * Make `obj` CLICK as component `id` without being its registered root.
+   *
+   * The rule this exists to keep: if a labelled component has visible parts —
+   * a beacon lamp, a glass silo, a status light — every one of those parts
+   * must select the component when clicked. A visual that swallows the ray
+   * (or resolves to nothing and lets the click fall through to whatever is
+   * behind it) reads as a broken UI, not as chrome.
+   */
+  alias(obj: THREE.Object3D, id: string): void {
+    const def = this.byId.get(id)
+    if (!def) {
+      console.warn(`[registry] alias to unknown component id "${id}"`)
+      return
+    }
+    this.byObject.set(obj, def)
+    obj.userData.componentId = id
+    this.aliased.push(obj)
+    this.version++
   }
 
   get(id: string): ComponentDef | undefined {
@@ -50,9 +75,9 @@ export class Registry {
     return this.ordered.filter((d) => d.district === id)
   }
 
-  /** Every registered root object — the raycaster's candidate set. */
+  /** Every registered root object plus every alias — the raycaster's candidate set. */
   roots(): THREE.Object3D[] {
-    return this.ordered.map((d) => d.object)
+    return [...this.ordered.map((d) => d.object), ...this.aliased]
   }
 
   /** Fuzzy search for the command palette. */
@@ -79,5 +104,7 @@ export class Registry {
     this.byId.clear()
     this.byObject.clear()
     this.ordered = []
+    this.aliased = []
+    this.version++
   }
 }

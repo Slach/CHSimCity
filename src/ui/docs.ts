@@ -164,7 +164,7 @@ Turn it on in the console and watch the part count collapse. Then read what \`wa
 
 That DDL runs on **every server in the cluster**. All four have the table, all four read the same \`system.clusters\`, and all four can answer the question — which is why there is one of these strips on each island rather than one initiator district between the clients and the shards.
 
-The table holds no rows. On **INSERT** it evaluates the sharding expression per row, splits the block, and sends each piece to one replica of the target shard. On **SELECT** it rewrites the query for one replica of each shard, sends it, and merges the partial results.`,
+The table holds no rows. On **INSERT** it evaluates the sharding expression per row, splits the block, and sends each piece to one replica of the target shard — as an INSERT into the **underlying local table** there (\`Distributed(cluster, db, local_table, key)\` names it), never into that server's own \`Distributed\` table. On **SELECT** it rewrites the query for one replica of each shard, sends it, and merges the partial results.`,
       },
       {
         heading: 'The initiator is whichever server the client called',
@@ -176,7 +176,9 @@ Note also what does **not** cross the network: a server reading its own shard ha
       },
       {
         heading: 'Background insert: the part people get wrong',
-        body: `With the default \`distributed_foreground_insert = 0\`, an INSERT into a \`Distributed\` table returns as soon as the block is written to **the local disk of the server the client reached**, under \`data/<cluster>/shard<N>_replica<M>/\`. A background thread forwards it afterwards.
+        body: `With the default \`distributed_foreground_insert = 0\`, an INSERT into a \`Distributed\` table returns as soon as each remote shard's slice is a .bin file on **the local disk of the server the client reached**, under \`data/<database>/<table>/shard<N>_all_replicas/\`. A background thread forwards each file afterwards — as an INSERT into the underlying MergeTree table on one live replica of its shard; the receiving server's own \`Distributed\` table is never involved.
+
+The exception is the initiator's OWN shard: \`prefer_localhost_replica\` (on by default) writes that slice into the local table synchronously even in background mode, so it skips the queue entirely.
 
 Look at the silos on each island. Whatever is in them is data that client has been told was accepted and which no shard has yet seen. If that server's disk dies, that data is gone — and *which* server was holding it is decided by which one the client happened to connect to.
 
@@ -273,27 +275,37 @@ Hash the column your queries actually group by, unless it is skewed. Then hash a
 
   {
     id: 'node.spool',
-    title: 'Background insert spool',
-    subtitle: 'blocks on the initiator’s own disk, not yet in any shard',
-    tldr: 'In background mode an INSERT is durable on the initiator, not on the shard.',
+    title: 'system.distribution_queue',
+    subtitle: 'the background INSERT queue, on the initiator’s own disk',
+    tldr: 'In background mode an INSERT is durable on the initiator, not on the shards.',
     sections: [
       {
         heading: 'Where these bytes live',
-        body: `\`data/<database>/<distributed_table>/shard<N>_replica<M>/*.bin\` on the initiator's local filesystem. One file per pending block per destination.
+        body: `\`data/<database>/<distributed_table>/shard<N>_all_replicas/*.bin\` on the initiator's local filesystem — one directory per destination shard (with \`internal_replication = true\` and the default compact naming), one file per pending block, one row per directory in \`system.distribution_queue\`. The client has already been told the INSERT succeeded.
 
-The client has already been told the INSERT succeeded. A background thread is working through the directory, one block at a time, with retries.`,
+A background thread works through each directory and sends every file as an INSERT into the **underlying MergeTree table** on ONE live replica of that shard, picked by \`load_balancing\` at send time — the receiving server's own \`Distributed\` table plays no part in it. Getting the rows to the shard's other replica is \`ReplicatedMergeTree\`'s job, through Keeper, not the Distributed engine's.`,
+      },
+      {
+        heading: 'What never enters the queue',
+        body: `The slice for the initiator's OWN shard. \`prefer_localhost_replica\` (on by default) writes it into the local table immediately and synchronously, even in background mode — no .bin file, no queue row, and no failover: if the local table is read-only because its Keeper session is gone, the INSERT fails outright despite the "background" in the setting's name.
+
+So a background INSERT is partly synchronous: when it returns, this server's shard already has its rows durable in MergeTree, while every other shard's rows are still files on this one disk.`,
       },
       {
         heading: 'When the silos fill',
-        body: `A silo that is filling faster than it drains means the destination is refusing or slow — a shard that is down, a replica that is read-only because Keeper is unreachable, or simply a shard whose merge pool has fallen behind and is delaying inserts.
+        body: `A silo filling faster than it drains means the destination is refusing or slow — a shard that is down, a replica that is read-only because Keeper is unreachable, or a shard whose merge pool has fallen far enough behind to delay inserts.
 
-The spool then becomes unbounded, and \`distributed_directory_monitor\` keeps retrying. \`system.distribution_queue\` is where you find out, and the number to watch there is \`data_files\`.`,
+The queue never drops a file. Each failed send raises \`error_count\` and the directory backs off exponentially — \`distributed_background_insert_sleep_time_ms\` (100 ms) × 2^\`error_count\`, capped by \`distributed_background_insert_max_sleep_time_ms\` (30 s) — then tries again. Watch \`data_files\` and \`data_compressed_bytes\` for depth, \`error_count\` and \`last_exception\` for why. \`is_blocked = 1\` means someone ran \`SYSTEM STOP DISTRIBUTED SENDS\`. A file the queue cannot even parse is moved to a \`broken/\` subdirectory and counted in \`broken_data_files\` — those are never retried.`,
       },
       {
         heading: 'The safe configuration',
-        body: `If losing an accepted INSERT is unacceptable, \`distributed_foreground_insert = 1\` and accept the latency. If it is acceptable, background mode with monitoring on \`system.distribution_queue\` is the faster answer.
+        body: `If losing an accepted INSERT is unacceptable, \`distributed_foreground_insert = 1\` and accept the latency. If it is acceptable, background mode with monitoring on \`system.distribution_queue\` is the faster answer. What is never right is background mode without that monitoring.
 
-What is never right is background mode without that monitoring.`,
+Older material calls all of this the "directory monitor": \`insert_distributed_sync\` and the \`distributed_directory_monitor_*\` settings were renamed to \`distributed_foreground_insert\` and \`distributed_background_insert_*\` in 23.10, and the old names still work as aliases.`,
+      },
+      {
+        heading: 'What the model simplifies',
+        body: `The flush cadence here is a few tenths of a second rather than 100 ms, and a failed send retries after a flat pause instead of the real exponential backoff — the queue depth and the never-drop behaviour are what this component is for, not the timing curve. Files are never batched (\`distributed_background_insert_batch\` is off by default anyway), and nothing ever lands in \`broken/\`.`,
       },
     ],
     metrics: [
@@ -304,6 +316,10 @@ What is never right is background mode without that monitoring.`,
     knobs: ['distributedInsert', 'nodeDown', 'keeperConnected'],
     see: ['node.dist'],
     refs: {
+      docs: [
+        { label: 'ClickHouse — system.distribution_queue', url: 'https://clickhouse.com/docs/operations/system-tables/distribution_queue' },
+        { label: 'ClickHouse — distributed_background_insert_sleep_time_ms', url: 'https://clickhouse.com/docs/operations/settings/settings#distributed_background_insert_sleep_time_ms' },
+      ],
       systemTables: [{ label: 'system.distribution_queue' }],
     },
   },

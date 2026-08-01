@@ -202,7 +202,7 @@ export const LOCAL = {
   shardWheel: [-40, 0, -97],
   /** `system.clusters` — this server's view of the cluster definition. */
   clustersBoard: [40, 0, -97],
-  /** `data/<cluster>/shard<N>_replica<M>/` — the background insert spool. */
+  /** The background INSERT queue on this disk — what `system.distribution_queue` reports. */
   insertSpool: [-92, 0, -95],
   /** Where partial results from the other shards are merged into an answer. */
   resultMerge: [92, 0, -95],
@@ -858,7 +858,21 @@ export const rid = {
   fanInsert: (from: number, to: number) => `fan.insert.${from}.${to}`,
   fanQuery: (from: number, to: number) => `fan.query.${from}.${to}`,
   fanResult: (from: number, to: number) => `fan.result.${from}.${to}`,
+  /**
+   * The background-insert path. With `distributed_foreground_insert = 0` a
+   * remote shard's slice is not sent: it is PARKED in the initiator's own
+   * `system.distribution_queue` directory (`distToSpool`), and a background
+   * thread later flushes it over the wire into the underlying MergeTree table
+   * of one live replica of the target shard (`spoolFlush`). The receiving
+   * server's `Distributed` table is not involved in either. There is no
+   * queue→own-dock route on purpose: the initiator's own shard never enters
+   * the queue (`prefer_localhost_replica` writes it synchronously), and a
+   * remote shard's queue cannot flush to this server.
+   */
+  distToSpool: (node: number) => `node.spool.${node}`,
+  spoolFlush: (from: number, to: number) => `spool.flush.${from}.${to}`,
   /** inside one node: the write path */
+  distToDock: (node: number) => `node.split.${node}`,
   sortBlock: (node: number) => `node.sort.${node}`,
   writeColumns: (node: number) => `node.write.${node}`,
   commitPart: (node: number) => `node.commit.${node}`,
@@ -893,19 +907,23 @@ export const rid = {
 for (let n = 0; n < N_NODES; n++) {
   const door = anchorAt(n, 'distTable')
   const res = anchorAt(n, 'resultMerge')
-  // Statements out on the west lane of the corridor, answers home on the east,
-  // so a busy server reads as two streams rather than one confused one.
   const lane = 30 + 14 * n
+
+  /* ONE corridor per server, travelled in both directions, because it is one
+   * TCP connection: the statement goes up it and the answer comes back down
+   * the same metal. Two separate lanes — statements west, answers east — were
+   * a picture of two connections that do not exist. */
+  const corridor: [number, number, number][] = [
+    [-26 + n * 17, 4, ANCHOR.clientTerminal[2] + 22],
+    [-26 + n * 17, 4, -392],
+    [door[0] - lane * 0.25, 5, -300],
+    [door[0] - 10, 5, door[2] - 40],
+    [door[0] - 4, 4, door[2] - 10],
+  ]
 
   route(
     rid.clientToNode(n),
-    [
-      [-26 + n * 17, 4, ANCHOR.clientTerminal[2] + 22],
-      [-26 + n * 17, 4, -392],
-      [door[0] - lane * 0.25, 5, -300],
-      [door[0] - 10, 5, door[2] - 40],
-      [door[0] - 4, 4, door[2] - 10],
-    ],
+    corridor,
     {
       what: 'a statement from the application',
       from: { label: 'application tier', id: 'clients' },
@@ -915,20 +933,19 @@ for (let n = 0; n < N_NODES; n++) {
     { color: COLOR.client, speed: 125, size: 1.35, visible: true, roadOpacity: 0.15 },
   )
 
+  /* The answer rides the SAME control points, reversed — Catmull-Rom is
+   * symmetric under reversal, so the two directions trace one curve — with a
+   * short approach from the result merge, where the one answer was assembled,
+   * down to the front door. The duct's road is drawn once, by the statement
+   * route above, exactly as the server-to-server ducts do it. */
   route(
     rid.nodeToClient(n),
-    [
-      [res[0], 6, res[2] - 8],
-      [res[0] + 8, 7, res[2] - 44],
-      [res[0] * 0.4, 7, -300],
-      [40 - n * 17, 6, -392],
-      [40 - n * 17, 6, ANCHOR.clientTerminal[2] + 22],
-    ],
+    [[res[0], 6, res[2] - 8], ...[...corridor].reverse()],
     {
       what: 'the answer to a statement',
       from: { label: `${nodeHost(n)} · result merge`, id: `node.${n}.resultmerge` },
       to: { label: 'application tier', id: 'clients' },
-      note: `The initiator combined its own rows with the partial results the other shards sent it, and this is the one answer the client sees. It never learns how many machines were involved.`,
+      note: `The initiator combined its own rows with the partial results the other shards sent it, and this is the one answer the client sees — going home over the same connection the statement arrived on. It never learns how many machines were involved.`,
     },
     { color: COLOR.ok, speed: 150, size: 1.0 },
   )
@@ -965,20 +982,35 @@ for (let from = 0; from < N_NODES; from++) {
     // is what keeps the two equal-span arcs (0↔2 and 1↔3) off each other, since
     // their x ranges overlap through the middle of the row.
     const y = 9 + rank * 4
-    const bow = (dy: number): [number, number, number][] => {
-      const mid: [number, number, number] = [
-        (a[0] + b[0]) / 2,
-        y + dy + 4,
-        (a[2] + b[2]) / 2 - (40 + 24 * rank),
-      ]
-      return [
-        [a[0], y + dy, a[2] + 6],
-        [(a[0] + mid[0]) / 2, y + dy + 2, (a[2] + mid[2]) / 2],
-        mid,
-        [(b[0] + mid[0]) / 2, y + dy + 2, (b[2] + mid[2]) / 2],
-        [b[0], y + dy, b[2] + 6],
-      ]
-    }
+    /* ONE arc for all three families and both directions — a forwarded block,
+     * a fanned-out SELECT and a partial result share one connection pool, so
+     * they ride one duct, and lane jitter keeps them apart inside it. The
+     * per-family vertical offsets this used to have predate the tube roads:
+     * they lifted the query and result families 1.6 and 3.2 units above the
+     * drawn duct, which put their packets visibly OUTSIDE the pipe. */
+    const mid: [number, number, number] = [
+      (a[0] + b[0]) / 2,
+      y + 4,
+      (a[2] + b[2]) / 2 - (40 + 24 * rank),
+    ]
+    const bow: [number, number, number][] = [
+      [a[0], y, a[2] + 6],
+      [(a[0] + mid[0]) / 2, y + 2, (a[2] + mid[2]) / 2],
+      mid,
+      [(b[0] + mid[0]) / 2, y + 2, (b[2] + mid[2]) / 2],
+      [b[0], y, b[2] + 6],
+    ]
+    /* An INSERT does not stop at the receiving server's Distributed table —
+     * the sender opened a connection and is inserting into the *MergeTree*
+     * table itself, so its duct rides the same bow and then keeps going, east
+     * around the hall (which tops out at y ≈ 11.4) and down to the insert
+     * dock. Ending this route at the far door was the old, wrong picture: it
+     * drew a Distributed→Distributed hop that does not exist. */
+    const dockB = anchorAt(to, 'insertDock')
+    const dropToDock: [number, number, number][] = [
+      [b[0] + 24, Math.max(8, y * 0.55), b[2] + 10],
+      [dockB[0] + 6, 6, dockB[2] - 4],
+    ]
 
     // The road belongs to the duct, not to any one of the three things on it,
     // so exactly one family draws it and only in the from < to direction —
@@ -991,15 +1023,16 @@ for (let from = 0; from < N_NODES; from++) {
     const b1 = nodeHost(to)
     const doorFrom: RouteEnd = { label: `${a1} · Distributed`, id: `node.${from}.dist` }
     const doorTo: RouteEnd = { label: `${b1} · Distributed`, id: `node.${to}.dist` }
+    const dockTo: RouteEnd = { label: `${b1} · insert dock`, id: `node.${to}.insertdock` }
 
     route(
       rid.fanInsert(from, to),
-      bow(0),
+      [...bow, ...dropToDock],
       {
         what: 'a block being forwarded to the shard that owns it',
         from: doorFrom,
-        to: doorTo,
-        note: `${a1} evaluated the sharding expression over the rows it was given, and these are the ones that hashed to ${b1}'s shard. They were never ${a1}'s to keep.`,
+        to: dockTo,
+        note: `${a1} evaluated the sharding expression over the rows it was given, and these are the ones that hashed to ${b1}'s shard. They were never ${a1}'s to keep — and they land in ${b1}'s underlying MergeTree table itself: ${b1}'s own Distributed table never sees them.`,
       },
       {
         color: COLOR.client,
@@ -1009,9 +1042,34 @@ for (let from = 0; from < N_NODES; from++) {
         roadOpacity: drawsRoad ? 0.13 : 0,
       },
     )
+    /* The background flush rides the same corridor but starts at the QUEUE —
+     * `system.distribution_queue` on the sender's own disk — because that is
+     * what actually holds the block once the client has already been told ok.
+     * No road of its own: in background mode (the default) the constant
+     * traffic makes the path evident, and a second static line from the spool
+     * would draw the six-pair arc diagram twice. */
+    const spoolA = anchorAt(from, 'insertSpool')
+    route(
+      rid.spoolFlush(from, to),
+      [
+        [spoolA[0], 5, spoolA[2] - 2],
+        [(spoolA[0] + mid[0]) / 2, y + 3, (spoolA[2] + mid[2]) / 2],
+        [mid[0], mid[1] + 1.5, mid[2]],
+        [(b[0] + mid[0]) / 2, y + 2, (b[2] + mid[2]) / 2],
+        [b[0], y, b[2] + 6],
+        ...dropToDock,
+      ],
+      {
+        what: 'a queued block being flushed to its shard',
+        from: { label: `${a1} · system.distribution_queue`, id: `node.${from}.spool` },
+        to: dockTo,
+        note: `The client that inserted this block got its ok when the block reached ${a1}'s disk. Only now does ${a1}'s background thread connect to one live replica of the target shard — ${b1} — and insert it into the underlying MergeTree table there, with retries until it works.`,
+      },
+      { color: COLOR.client, speed: 140, size: 1.25 },
+    )
     route(
       rid.fanQuery(from, to),
-      bow(1.6),
+      bow,
       {
         what: 'a SELECT being fanned out',
         from: doorFrom,
@@ -1022,7 +1080,7 @@ for (let from = 0; from < N_NODES; from++) {
     )
     route(
       rid.fanResult(from, to),
-      bow(3.2),
+      bow,
       {
         what: 'a partial result coming home',
         from: doorFrom,
@@ -1051,6 +1109,53 @@ for (let n = 0; n < N_NODES; n++) {
   const dockEnd: RouteEnd = { label: `${host} · insert dock`, id: `node.${n}.insertdock` }
   const yardEnd: RouteEnd = { label: `${host} · parts yard`, id: `node.${n}.yard` }
   const volEnd: RouteEnd = { label: `${host} · storage volumes`, id: `node.${n}.volumes` }
+  const door = anchorAt(n, 'distTable')
+
+  /* Distributed → the real table's dock. This is the leg that makes the SPLIT
+   * visible: one pod comes up the client corridor into the Distributed table,
+   * and per-shard slices leave it — this one down to the local table, the
+   * other over the wire to the other shard (`fan.insert.*`). Without it the
+   * incoming freight vanished at the door and parts appeared from nowhere. */
+  route(
+    rid.distToDock(n),
+    [
+      [door[0] - 2, 4, door[2] - 4],
+      [(door[0] + dock[0]) / 2, 6, (door[2] + dock[2]) / 2],
+      [dock[0], 6, dock[2] - 4],
+    ],
+    {
+      what: "one shard's slice of an INSERT block",
+      from: { label: `${host} · Distributed`, id: `node.${n}.dist` },
+      to: dockEnd,
+      note: `The Distributed table evaluated the sharding expression, and these are the rows that belong to this server's own shard — they go straight down to the local table, with no network hop at all. That short-cut is \`prefer_localhost_replica\`, and it is on by default.`,
+    },
+    { color: COLOR.client, speed: 95, size: 1.2, visible: true, roadOpacity: 0.12 },
+  )
+
+  /* Distributed → the queue. The OTHER shard's slice, in background mode: it
+   * is not sent anywhere yet, it is written to this server's own disk under
+   * `data/<database>/<table>/` — the directory `system.distribution_queue`
+   * reports on — and the ok goes back to the client while it sits here. */
+  const spoolAt = anchorAt(n, 'insertSpool')
+  /* Overhead, in one clear bow ABOVE the sharding wheel (its ring sits at
+   * y ≈ 8–10), not along the ground through it: a duct at plinth height was
+   * unreadable there and could not be clicked, because the wheel and the
+   * silos swallowed every ray before it reached the tube. */
+  route(
+    rid.distToSpool(n),
+    [
+      [door[0] - 14, 8, door[2]],
+      [(door[0] + spoolAt[0]) / 2, 19, door[2] + 1],
+      [spoolAt[0] + 10, 9, spoolAt[2]],
+    ],
+    {
+      what: "a slice parked in the initiator's own queue",
+      from: { label: `${host} · Distributed`, id: `node.${n}.dist` },
+      to: { label: `${host} · system.distribution_queue`, id: `node.${n}.spool` },
+      note: `With \`distributed_foreground_insert = 0\` — the default — a slice bound for another shard is not sent now. It becomes a .bin file on THIS server's disk, the client is told ok, and a background thread flushes it later. Until that flush lands, no shard has this data.`,
+    },
+    { color: COLOR.client, speed: 90, size: 1.2, visible: true, roadOpacity: 0.12 },
+  )
 
   route(
     rid.sortBlock(n),
@@ -1084,12 +1189,19 @@ for (let n = 0; n < N_NODES; n++) {
     { color: COLOR.partPreactive, speed: 80, size: 1.15 },
   )
 
+  /* Every point is derived from THIS island's anchors. The previous version
+   * had `writers[0] * 0.5` — half of a WORLD x, which pulled the curve toward
+   * world zero and across the neighbouring island — and a raw `-52` used as a
+   * world z that was really a node-local one. It rides OVER the strip between
+   * the writers and the yard (the cache deck plate is at y ≈ 9), because a
+   * ground-level shortcut reads as a road through buildings it has nothing to
+   * do with. */
   route(
     rid.commitPart(n),
     [
-      [writers[0], 6, writers[2] + 4],
-      [writers[0] * 0.5, 10, -52],
-      [yard[0] + 8, 8, yard[2] - 26],
+      [writers[0], 7, writers[2] + 3],
+      [(writers[0] + yard[0]) / 2 + 6, 20, (writers[2] + yard[2]) / 2],
+      [yard[0] + 6, 12, yard[2] - 22],
       [yard[0], 5, yard[2] - 12],
     ],
     {

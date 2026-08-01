@@ -15,10 +15,12 @@ import { makeRng, reduceMotion } from '../core/util'
  * Two things a packet says on sight, before any label is read:
  *   - HUE is the read/write axis. Red is data being written, green is data
  *     being answered out. See KIND_AXIS for what is deliberately neither.
- *   - BULK is the batch. `size` comes from the row count of the real block,
- *     scaled logarithmically, so one 100k-row INSERT is visibly one big pod and
- *     a hundred 1k-row INSERTs are visibly a hundred small ones — which is the
- *     whole argument for batching, made without a single number on screen.
+ *   - BULK is the batch, and the batch is LENGTH. `size` arrives in decades of
+ *     rows (flowSize in sim/model.ts) and each decade stretches the pod ×2.5:
+ *     a 100-row INSERT is a pellet, a 2M-row one is a ~26-unit freight run,
+ *     and a hundred tiny INSERTs are visibly a hundred pellets — the whole
+ *     argument for batching, made without a single number on screen. Width
+ *     grows only gently, because the duct the pod rides in caps it.
  *
  * Hard rules that shape this file:
  *   - one draw call for the whole cluster's traffic;
@@ -33,8 +35,28 @@ import { makeRng, reduceMotion } from '../core/util'
 const SAMPLES = 96
 /** Staggered emissions waiting for their turn. Oldest is dropped on overflow. */
 const PENDING_CAP = 512
-/** Multiplier on the pod's own body for a size-1 packet. */
+/** Multiplier on the pod's own body, before the bulk axes below. */
 const PACKET_SCALE = 1.9
+/*
+ * The bulk axes. `size` arrives in DECADES of rows above 100 — see flowSize in
+ * sim/model.ts, the one place a size may come from.
+ *
+ * LENGTH is the batch: ×2.5 per decade of rows, because length is the one
+ * dimension the duct does not cap — four decades of batch cannot fit in a
+ * cross-section. The growth was 2.0 first, and from the establishing shot a
+ * 100k pod and a 2M pod still read as merely "big" and "bigger"; 2.5 makes
+ * each decade a different CLASS of freight (100 rows ≈ 0.6 world units, 100k
+ * ≈ 9, 2M ≈ 26). LEN_MAX stops the top of the knob just past that — a pod
+ * longer than that cuts visibly across the tighter arcs' curvature and reads
+ * as a wall, not a train. WIDTH grows only gently and, at the very top of the
+ * `insertBlockRows` knob, still sits inside ROAD_RADIUS (engine/roads.ts):
+ * the pod always reads as freight IN the pipe.
+ */
+const LEN_BASE = 0.34
+const LEN_GROWTH = 2.5
+const LEN_MAX = 15
+const WIDTH_BASE = 0.33
+const WIDTH_PER_DECADE = 0.16
 /**
  * Instance colours are pushed past 1.0 so they clear the bloom threshold
  * (0.85, see engine/renderer.ts). Structure never glows; data always does.
@@ -46,10 +68,12 @@ const FADE_OUT = 0.12
 const MAX_BURST = 256
 
 /**
- * Packet silhouette per FlowKind. Meaning is carried by *bulk*, never by
- * elongation: a part is a wide pallet, a Keeper request is a small crate. No
- * kind is allowed a length-to-width ratio above the pod's own, so nothing on
- * any route can read as a tracer round no matter how fast it is travelling.
+ * Packet silhouette per FlowKind: a part is a wide pallet, a Keeper request is
+ * a small crate. A KIND is never allowed a length-to-width ratio above the
+ * pod's own — elongation is reserved for the BATCH (LEN_BASE above), which
+ * stretches the pod into a train riding inside a visible duct. Speed stretches
+ * nothing, so nothing on any route can read as a tracer round no matter how
+ * fast it is travelling.
  */
 const KIND_ORDER: readonly FlowKind[] = [
   'insert',
@@ -133,6 +157,7 @@ const _mat = new THREE.Matrix4()
 const _col = new THREE.Color()
 /** Scratch for screen-space picking; see pickAt. */
 const _pick = new THREE.Vector3()
+const _camPos = new THREE.Vector3()
 
 /** Largest i with cum[i] <= d, clamped so i+1 is always a valid sample. */
 function segFor(cum: Float32Array, d: number): number {
@@ -154,7 +179,9 @@ function segFor(cum: Float32Array, d: number): number {
  * by speed draws a lit streak across the sky, and a lit streak crossing a dark
  * scene is a tracer round whatever the label on it says. A pod cannot make that
  * picture. It still points along the tangent, so motion stays purposeful, but
- * the silhouette is cargo: something being carried somewhere on purpose.
+ * the silhouette is cargo: something being carried somewhere on purpose. When
+ * the BATCH stretches it (LEN_BASE), the chamfered ends and the constant width
+ * keep it reading as a longer wagon of the same freight, not a faster round.
  *
  * Vertex colour dims the two end caps, which gives the body a lit-carriage read
  * up close and costs nothing — the instance colour still supplies the hue.
@@ -210,6 +237,16 @@ function packetGeometry(): THREE.BufferGeometry {
 export interface FlowPick {
   route: string
   kind: FlowKind | null
+  /** How far the packet's centre was from the cursor, CSS px — the picker
+   * uses it to decide whether the user aimed AT the packet or merely near it. */
+  px: number
+  /**
+   * The cursor was within the packet's own APPARENT footprint (screen size,
+   * plus a small margin). A fixed pixel radius cannot say "aimed at": at the
+   * establishing distance a pod is three pixels wide and a 9 px circle around
+   * every pod blanketed the whole Distributed strip.
+   */
+  aimed: boolean
 }
 
 export interface FlowsApi {
@@ -346,7 +383,8 @@ export function createFlows(
 
   let pT!: Float32Array
   let pSpeed!: Float32Array
-  let pSize!: Float32Array
+  let pW!: Float32Array
+  let pLen!: Float32Array
   let pLatA!: Float32Array
   let pLatB!: Float32Array
   let pRoute!: Int32Array
@@ -384,7 +422,8 @@ export function createFlows(
 
     pT = new Float32Array(pool)
     pSpeed = new Float32Array(pool)
-    pSize = new Float32Array(pool)
+    pW = new Float32Array(pool)
+    pLen = new Float32Array(pool)
     pLatA = new Float32Array(pool)
     pLatB = new Float32Array(pool)
     pRoute = new Int32Array(pool)
@@ -500,7 +539,9 @@ export function createFlows(
     const jitter = 0.88 + rng() * 0.26
     pT[i] = 0
     pSpeed[i] = speed * jitter
-    pSize[i] = size
+    // The bulk axes, resolved once here so update() never calls pow().
+    pW[i] = WIDTH_BASE + WIDTH_PER_DECADE * size
+    pLen[i] = Math.min(LEN_MAX, LEN_BASE * Math.pow(LEN_GROWTH, size))
     pLatA[i] = (rng() * 2 - 1) * spread
     pLatB[i] = (rng() * 2 - 1) * spread * 0.5
     pRoute[i] = route
@@ -532,10 +573,11 @@ export function createFlows(
     const color = req.color ?? axisColor
     const speed = req.speed ?? b.speed
     // A packet's BULK is how much data it is carrying — see FlowRequest.size,
-    // which the model derives from the row count of the actual batch. Clamped
-    // because a pod wider than the road it is on stops reading as freight and
-    // starts reading as a wall.
-    const size = Math.min(3.6, Math.max(0.3, req.size ?? b.size))
+    // which the model derives from the row count of the actual batch, in
+    // decades. Clamped at 4.4 (just past the top of `insertBlockRows`) because
+    // length doubles per decade and an unbounded train stops reading as one
+    // packet at all.
+    const size = Math.min(4.4, Math.max(0, req.size ?? b.size))
     const spread = req.spread ?? 1.0
     const kind = req.kind !== undefined ? (KIND_INDEX.get(req.kind) ?? KIND_DEFAULT) : KIND_DEFAULT
     const stagger = req.stagger ?? 0
@@ -636,8 +678,8 @@ export function createFlows(
       fade = fade * fade * (3 - 2 * fade)
 
       const k = pKind[i]
-      const w = pSize[i] * PACKET_SCALE * fade * KIND_W[k]
-      const len = pSize[i] * PACKET_SCALE * fade * KIND_L[k]
+      const w = pW[i] * PACKET_SCALE * fade * KIND_W[k]
+      const len = pLen[i] * PACKET_SCALE * fade * KIND_L[k]
 
       _quat.setFromUnitVectors(FORWARD, _tan)
       _scl.set(w, w, len)
@@ -674,8 +716,22 @@ export function createFlows(
     halfH: number,
     radiusPx: number,
   ): FlowPick | null {
+    /* A pod is a SEGMENT on screen, not a point. A long train's centre can be
+     * thirty pixels from a click that is squarely ON its body, and measuring
+     * from the centre also blankets everything sideways within half a train
+     * length — which is how the Distributed strip's buildings kept losing
+     * clicks to result trains passing in front. So: project the spine's two
+     * endpoints (basis z of the instance matrix IS the tangent scaled by the
+     * train's length), take the cursor's distance to that 2D segment, and
+     * call the pick AIMED only within the train's apparent half-WIDTH plus a
+     * 4 px margin for a moving target. */
+    const fov = (camera as THREE.PerspectiveCamera).fov ?? 50
+    const focalPx = halfH / Math.tan((fov * Math.PI) / 360)
+    _camPos.setFromMatrixPosition(camera.matrixWorld)
+
     let best = -1
-    let bestD2 = radiusPx * radiusPx
+    let bestD = Infinity
+    let bestAimed = false
     for (let a = 0; a < nAct; a++) {
       const i = act[a]
       const o = i * 16
@@ -683,19 +739,47 @@ export function createFlows(
       // still on screen as a point, and picking one would report a packet the
       // user cannot see.
       if (mArr[o] === 0 && mArr[o + 5] === 0 && mArr[o + 10] === 0) continue
-      _pick.set(mArr[o + 12], mArr[o + 13], mArr[o + 14]).project(camera)
+      const cx = mArr[o + 12]
+      const cy = mArr[o + 13]
+      const cz = mArr[o + 14]
+      const hx = mArr[o + 8] * 0.5
+      const hy = mArr[o + 9] * 0.5
+      const hz = mArr[o + 10] * 0.5
+      _pick.set(cx - hx, cy - hy, cz - hz).project(camera)
       if (_pick.z > 1) continue // behind the camera, or past the far plane
-      const dx = (_pick.x - ndcX) * halfW
-      const dy = (_pick.y - ndcY) * halfH
-      const d2 = dx * dx + dy * dy
-      if (d2 < bestD2) {
-        bestD2 = d2
+      const ax = (_pick.x - ndcX) * halfW
+      const ay = (_pick.y - ndcY) * halfH
+      _pick.set(cx + hx, cy + hy, cz + hz).project(camera)
+      if (_pick.z > 1) continue
+      const bx = (_pick.x - ndcX) * halfW
+      const by = (_pick.y - ndcY) * halfH
+      const ex = bx - ax
+      const ey = by - ay
+      const l2 = ex * ex + ey * ey
+      let t = l2 > 0 ? -(ax * ex + ay * ey) / l2 : 0
+      t = t < 0 ? 0 : t > 1 ? 1 : t
+      const d = Math.hypot(ax + ex * t, ay + ey * t)
+
+      const sw = Math.hypot(mArr[o], mArr[o + 1], mArr[o + 2])
+      const dist = Math.max(1, Math.hypot(cx - _camPos.x, cy - _camPos.y, cz - _camPos.z))
+      const widPx = (sw * 0.5 * focalPx) / dist
+      const aimed = d <= widPx + 4
+      if (d > Math.max(radiusPx, widPx + 4)) continue
+      // An aimed pick beats any near miss; among equals the closer spine wins.
+      if ((aimed && !bestAimed) || (aimed === bestAimed && d < bestD)) {
         best = i
+        bestD = d
+        bestAimed = aimed
       }
     }
     if (best < 0) return null
     const k = pKind[best]
-    return { route: bakes[pRoute[best]].id, kind: k < KIND_ORDER.length ? KIND_ORDER[k] : null }
+    return {
+      route: bakes[pRoute[best]].id,
+      kind: k < KIND_ORDER.length ? KIND_ORDER[k] : null,
+      px: bestD,
+      aimed: bestAimed,
+    }
   }
 
   /* ---- quality / teardown -----------------------------------------------*/

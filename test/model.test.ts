@@ -555,6 +555,40 @@ describe('the Distributed table', () => {
     }
   })
 
+  it('never queues the slice for the initiator’s own shard', () => {
+    // `prefer_localhost_replica` is on by default: in background mode the slice
+    // for the initiator's OWN shard is inserted into the local table right
+    // away, synchronously — only the slices bound for other shards are parked
+    // in `system.distribution_queue`. So server n's queue for shardOf(n) must
+    // stay empty at every instant, on every initiator.
+    const sim = makeSim({ insertsPerSec: 24, insertBlockRows: 50000 })
+    observe(sim, 30, () => {
+      for (let n = 0; n < N_NODES; n++) {
+        expect(
+          sim.state.nodes[n].distributed.pendingBlocks[shardOf(n)],
+          `node ${n} queued a block for its own shard`,
+        ).toBe(0)
+      }
+    })
+  })
+
+  it('never drops a queued block while the destination cannot accept it', () => {
+    // The real queue retries with backoff; it NEVER discards a file. With
+    // Keeper gone every replica is read-only, so no flush can succeed and the
+    // queued depth may only grow — a model that quietly dropped a block here
+    // would keep `data_files` pretty while losing acknowledged data.
+    const sim = makeSim({ keeperConnected: false, insertsPerSec: 24, insertBlockRows: 50000 })
+    run(sim, 1) // one settling second: readOnly flips on the first tick
+    let prev = 0
+    observe(sim, 20, () => {
+      let queued = 0
+      for (const n of sim.state.nodes) for (const b of n.distributed.pendingBlocks) queued += b
+      expect(queued, 'the queue shrank while every replica was read-only').toBeGreaterThanOrEqual(prev)
+      prev = queued
+    })
+    expect(prev).toBeGreaterThan(0)
+  })
+
   it('never makes a server that is down the initiator', () => {
     // Every real driver fails over. The statement must not be dropped and must
     // not be handed to the dead server either.

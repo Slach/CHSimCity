@@ -110,7 +110,7 @@ The geography is the order things happen in.
 | District | What it is |
 |---|---|
 | **Client terminal** (north, outside) | The application tier. It knows one table name and nothing about shards |
-| **Distributed strip** (on each island) | Not a district — a table on every server. The hash wheel is the sharding key; the silos are that server's own background insert spool; the merge floor is where it combines partial results |
+| **Distributed strip** (on each island) | Not a district — a table on every server. The hash wheel is the sharding key; the silos are that server's own `system.distribution_queue` — remote shards' slices parked on its disk; the merge floor is where it combines partial results |
 | **Four islands** (a row, in pairs) | Each is one ClickHouse server. Two islands close together are the two replicas of one shard; the wide channel between the pairs is the shard boundary, and a part is fetched across the narrow gap but never across the wide one |
 | **Keeper quorum** (south) | Three raft nodes. Metadata only — and every write depends on them |
 

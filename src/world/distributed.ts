@@ -24,11 +24,12 @@ import { anchorAt, nodeHost, shardOf } from './layout'
  *                       turns, and the block leaves in N pieces. The two lit
  *                       arcs are the shards and their WIDTH is the cumulative
  *                       share each has received through THIS server.
- *   THE SPOOL (west)    `data/<cluster>/shard<N>_replica<M>/` on THIS server's
- *                       disk. In background mode the INSERT returns as soon as
- *                       the block is here — so if this server dies, these
- *                       blocks die with it, and which server it was is a
- *                       property of the client's connection.
+ *   THE QUEUE (west)    `system.distribution_queue` — .bin files under
+ *                       `data/<database>/<table>/` on THIS server's disk. In
+ *                       background mode the INSERT returns as soon as the
+ *                       block is here — so if this server dies, these blocks
+ *                       die with it, and which server it was is a property of
+ *                       the client's connection.
  *   THE MERGE FLOOR     where partial results from the other shards are
  *                       combined. Real CPU work, done by whichever server the
  *                       client happened to reach.
@@ -140,9 +141,13 @@ export const createDistributed: WorldFactory = (ctx): WorldModule => {
     hall.receiveShadow = true
     group.add(hall)
 
+    /* The beacon lamps and the silo fills stay raycastable and are ALIASED to
+     * their component after the registrations below: the lamp is the part of
+     * the building the eye lands on, so it is the part the cursor lands on,
+     * and a lamp that swallowed the click used to read as "this is not
+     * clickable" for the whole strip. */
     const tableLamp = new THREE.Mesh(own(new THREE.SphereGeometry(1.8, 12, 10)), neonWhite)
     tableLamp.position.set(door[0], 13.6, door[2])
-    tableLamp.raycast = () => {}
     tableLamp.userData.chNoShadow = true
     group.add(tableLamp)
 
@@ -172,21 +177,22 @@ export const createDistributed: WorldFactory = (ctx): WorldModule => {
 
     const hubLamp = new THREE.Mesh(own(new THREE.SphereGeometry(1.7, 12, 10)), neonWhite)
     hubLamp.position.set(wheelAt[0], wheelY + 2.6, wheelAt[2])
-    hubLamp.raycast = () => {}
     hubLamp.userData.chNoShadow = true
     group.add(hubLamp)
 
-    /* --- the background insert spool ------------------------------------ */
+    /* --- the background INSERT queue — system.distribution_queue -------- */
 
     // One silo per shard. Its fill is the bytes THIS server is holding and has
     // not forwarded — the data that is at risk in background mode.
     const siloFill: THREE.Mesh[] = []
+    const siloShells: THREE.Mesh[] = []
     for (let s = 0; s < N_SHARDS; s++) {
       const x = spoolAt[0] + (s - (N_SHARDS - 1) / 2) * 15
       const shell = new THREE.Mesh(unitCyl, matGlass)
       shell.position.set(x, 2.4 + SILO_H / 2, spoolAt[2])
       shell.scale.set(10, SILO_H, 10)
       group.add(shell)
+      siloShells.push(shell)
 
       const ring = theme.edges(theme.cyl(0.5, 0.5, 1, 12), COLOR.distributed, 0.3)
       ring.position.copy(shell.position)
@@ -196,7 +202,6 @@ export const createDistributed: WorldFactory = (ctx): WorldModule => {
       const fill = new THREE.Mesh(unitCyl, theme.neon(COLOR.distributed, 1.2))
       fill.position.set(x, 2.6, spoolAt[2])
       fill.scale.set(8.6, 0.4, 8.6)
-      fill.raycast = () => {}
       fill.userData.chNoShadow = true
       group.add(fill)
       siloFill.push(fill)
@@ -212,7 +217,6 @@ export const createDistributed: WorldFactory = (ctx): WorldModule => {
 
     const mergeLamp = new THREE.Mesh(own(new THREE.SphereGeometry(1.6, 12, 10)), neonWhite)
     mergeLamp.position.set(mergeAt[0], 11.5, mergeAt[2])
-    mergeLamp.raycast = () => {}
     mergeLamp.userData.chNoShadow = true
     group.add(mergeLamp)
 
@@ -227,8 +231,9 @@ export const createDistributed: WorldFactory = (ctx): WorldModule => {
     for (let h = 0; h < N_NODES; h++) {
       const x = boardAt[0] - 12 + h * 8
       const lamp = new THREE.Mesh(own(new THREE.SphereGeometry(1.15, 10, 8)), neonWhite)
-      lamp.position.set(x, 9, boardAt[2] + 1.3)
-      lamp.raycast = () => {}
+      // On the NORTH face of the board: the clients arrive from the north, and
+      // a status board that faces away from the reader shows them its back.
+      lamp.position.set(x, 9, boardAt[2] - 1.3)
       lamp.userData.chNoShadow = true
       group.add(lamp)
       hostLamps.push(lamp)
@@ -307,8 +312,8 @@ export const createDistributed: WorldFactory = (ctx): WorldModule => {
 
     ctx.register({
       id: `node.${n}.spool`,
-      name: 'background insert spool',
-      role: 'blocks on THIS server’s disk, not yet in any shard',
+      name: 'system.distribution_queue',
+      role: 'blocks queued on THIS server’s disk, not yet in any shard',
       kind: 'storage',
       district: 'nodes',
       object: siloFill[0],
@@ -324,7 +329,7 @@ export const createDistributed: WorldFactory = (ctx): WorldModule => {
           blocks += d.pendingBlocks[i]
           bytes += d.pendingBytes[i]
         }
-        if (s.knobs.distributedInsert === 'foreground') return 'foreground insert — nothing is spooled'
+        if (s.knobs.distributedInsert === 'foreground') return 'foreground insert — the queue stays empty'
         return blocks > 0 ? `${blocks} blocks · ${fmtBytes(bytes)} at risk on this disk` : 'empty'
       },
     })
@@ -363,6 +368,15 @@ export const createDistributed: WorldFactory = (ctx): WorldModule => {
         return `${up} of ${N_NODES} hosts reachable`
       },
     })
+
+    /* --- aliases: every visible part of a component selects it ------------ */
+
+    ctx.alias(tableLamp, `node.${n}.dist`)
+    ctx.alias(hubLamp, `node.${n}.wheel`)
+    ctx.alias(mergeLamp, `node.${n}.resultmerge`)
+    for (const shell of siloShells) ctx.alias(shell, `node.${n}.spool`)
+    for (const fill of siloFill) ctx.alias(fill, `node.${n}.spool`)
+    for (const lamp of hostLamps) ctx.alias(lamp, `node.${n}.clusters`)
   }
 
   wheelMesh.instanceColor!.setUsage(THREE.DynamicDrawUsage)

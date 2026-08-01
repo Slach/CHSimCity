@@ -4,6 +4,7 @@ import type { Registry } from '../core/registry'
 import type { Bus, ComponentDef, DistrictId, ThemeApi } from '../core/types'
 import { clamp } from '../core/util'
 import type { FlowPick, FlowsApi } from './flows'
+import type { RoadsApi } from './roads'
 
 /* ============================================================================
  * PICKER — pointing at the cluster.
@@ -166,6 +167,8 @@ interface Marker {
 
 export interface PickHit {
   id: string
+  /** Along the ray, world units — lets a caller weigh this against other hits. */
+  distance?: number
 }
 
 export interface PickerApi {
@@ -185,8 +188,10 @@ export function createPicker(opts: {
   theme: ThemeApi
   /** Optional: without it, packets simply are not pickable. */
   flows?: FlowsApi
+  /** Optional: without it, the duct tubes are not pickable. */
+  roads?: RoadsApi
 }): PickerApi {
-  const { dom, camera, registry, bus, theme, flows } = opts
+  const { dom, camera, registry, bus, theme, flows, roads } = opts
 
   const group = new THREE.Group()
   group.name = 'picker'
@@ -254,9 +259,11 @@ export function createPicker(opts: {
   let roots: THREE.Object3D[] = []
   let rootCount = -1
   function candidates(): THREE.Object3D[] {
-    const n = registry.all().length
-    if (n !== rootCount) {
-      rootCount = n
+    // Keyed on the registry's version, not its def count: aliases add raycast
+    // candidates without adding components, and a count-keyed cache never saw
+    // them.
+    if (registry.version !== rootCount) {
+      rootCount = registry.version
       roots = registry.roots()
     }
     return roots
@@ -273,7 +280,12 @@ export function createPicker(opts: {
     return true
   }
 
-  /** How far from the cursor a packet still counts as clicked, in CSS pixels. */
+  /** Merely NEAR a packet: it still wins, but only over empty ground. Busy
+   * islands made 22 px unconditional — with insert traffic streaming past the
+   * Distributed strip there was almost always a packet within 22 px of any
+   * point on it, so its buildings could not be clicked at all. A packet the
+   * cursor is actually ON (`aimed`, from its apparent screen size) still wins
+   * over everything. */
   const PACKET_GRAB_PX = 22
   /** The packet under the cursor when the button went DOWN. See onPointerDown. */
   let downPacket: FlowPick | null = null
@@ -298,7 +310,7 @@ export function createPicker(opts: {
       const obj = _hits[i].object
       if (!shown(obj)) continue
       const def = registry.resolve(obj)
-      if (def) return { id: def.id }
+      if (def) return { id: def.id, distance: _hits[i].distance }
     }
     return null
   }
@@ -358,21 +370,59 @@ export function createPicker(opts: {
      * camera. */
     if (document.pointerLockElement !== null) return
 
-    /* A PACKET WINS OVER THE STRUCTURE BEHIND IT.
+    /* A PACKET WINS OVER THE STRUCTURE BEHIND IT — but only when it was AIMED
+     * AT: the cursor inside the packet's own apparent footprint (`aimed`).
      *
-     * Traffic is the thing in motion and the thing in front; a click that lands
-     * on a moving box and selects the building a kilometre behind it is a click
-     * the user has to take back. The tolerance is generous for the same reason
-     * — see `flows.pickAt`. Nothing under the cursor at all still clears both
-     * selections, so clicking empty ground means what it always meant. */
+     * Traffic is the thing in motion and the thing in front; a click that
+     * lands on a moving box and selects the building a kilometre behind it is
+     * a click the user has to take back. But a fixed pixel radius cannot say
+     * "aimed": from the establishing distance a pod is three pixels wide, and
+     * any such radius around every pod blanketed whole districts — the
+     * Distributed strip could not be clicked at all through its own traffic.
+     * A packet in the slop zone now only beats EMPTY ground (below, after the
+     * structures and the ducts have had their chance), so clicking a quiet
+     * patch near a passing pod still catches it. */
     const packet = downPacket
     downPacket = null
-    if (packet) {
+    if (packet && packet.aimed) {
       bus.emit('flow:select', { route: packet.route, kind: packet.kind ?? undefined })
       return
     }
 
     const hit = pickAt(ev.clientX, ev.clientY)
+
+    /* A DUCT IS CLICKED ON ITS WALL — but a COMPONENT behind it wins anyway.
+     *
+     * A tube is 1.6 units thick and a few pixels wide on screen; a building is
+     * neither, and a labelled component that cannot be clicked because some
+     * arc crosses in front of it reads as a broken UI. The six server-to-server
+     * ducts funnel into each island's front door, so from most camera angles
+     * SOME tube crossed every ray to the Distributed strip. So: a tier ≥ 1
+     * component beats the duct outright — the duct is still clickable along
+     * the open-ground run that is most of its length. Against tier-0
+     * catch-alls (the ground plate, the island slab) the nearest surface wins
+     * as before; ordering by "was anything hit at all" instead of by distance
+     * would kill duct picking entirely, because the registered ground is
+     * behind every duct in every downward-looking view. */
+    if (roads) {
+      if (rectDirty) readRect()
+      _ndc.set(((ev.clientX - rectX) / rectW) * 2 - 1, -((ev.clientY - rectY) / rectH) * 2 + 1)
+      raycaster.setFromCamera(_ndc, camera)
+      const duct = roads.pickRoute(raycaster)
+      const componentHit = hit !== null && (registry.get(hit.id)?.tier ?? 0) >= 1
+      if (duct && !componentHit && (!hit || duct.distance < (hit.distance ?? Infinity))) {
+        bus.emit('flow:select', { route: duct.route })
+        return
+      }
+    }
+
+    // The slop-zone packet: nothing solid under the cursor, so the near-miss
+    // on the moving pod is the likeliest intent left.
+    if (!hit && packet) {
+      bus.emit('flow:select', { route: packet.route, kind: packet.kind ?? undefined })
+      return
+    }
+
     const id = hit?.id ?? null
     bus.emit('flow:select', { route: null })
     bus.emit('select', { id })

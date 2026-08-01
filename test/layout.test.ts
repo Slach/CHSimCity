@@ -343,13 +343,14 @@ describe('the route network', () => {
       // real duct — the fan-out is not one node's job.
       for (let to = 0; to < N_NODES; to++) {
         if (from === to) continue
-        ids.push(rid.fanInsert(from, to), rid.fanQuery(from, to), rid.fanResult(from, to))
+        ids.push(rid.fanInsert(from, to), rid.fanQuery(from, to), rid.fanResult(from, to), rid.spoolFlush(from, to))
       }
     }
     for (let n = 0; n < N_NODES; n++) {
       ids.push(
         rid.clientToNode(n),
         rid.nodeToClient(n),
+        rid.distToSpool(n),
         rid.sortBlock(n),
         rid.writeColumns(n),
         rid.commitPart(n),

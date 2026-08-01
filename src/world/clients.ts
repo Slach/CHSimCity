@@ -124,15 +124,15 @@ export const createClients: WorldFactory = (ctx): WorldModule => {
   readDock.castShadow = true
   group.add(readDock)
 
+  /* Both lamps stay raycastable and are aliased after registration — the lamp
+   * is where the eye lands, so it is where the cursor lands. */
   const readLamp = new THREE.Mesh(own(new THREE.SphereGeometry(1.9, 10, 8)), neonWhite)
   readLamp.position.set(26, 8, tz + TERMINAL_D / 2 + 10)
-  readLamp.raycast = () => {}
   readLamp.userData.chNoShadow = true
   group.add(readLamp)
 
   const writeLamp = new THREE.Mesh(own(new THREE.SphereGeometry(1.9, 10, 8)), neonWhite)
   writeLamp.position.set(-26, 19, tz + TERMINAL_D / 2 + 10)
-  writeLamp.raycast = () => {}
   writeLamp.userData.chNoShadow = true
   group.add(writeLamp)
 
@@ -178,6 +178,10 @@ export const createClients: WorldFactory = (ctx): WorldModule => {
     color: COLOR.partPreactive,
     readout: (s: SimState) => `${fmtNum(s.knobs.insertBlockRows)} rows per block`,
   })
+
+  ctx.alias(writeLamp, 'clients.batch')
+  ctx.alias(readLamp, 'clients')
+  ctx.alias(readDock, 'clients')
 
   /* --- update ------------------------------------------------------------- */
 

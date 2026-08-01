@@ -96,15 +96,16 @@ export const createKeeper: WorldFactory = (ctx): WorldModule => {
 
     // The crown carries the role: leader, follower, or dark. Nothing else about
     // the three halls differs, because in raft nothing else does.
+    /* The crown, the lamp and the beacon stay raycastable and are aliased to
+     * this hall after registration: they are the parts of the hall the eye —
+     * and therefore the cursor — lands on. */
     const crown = new THREE.Mesh(theme.box(HALL_W * 0.7, 1.8, HALL_D * 0.7), neonWhite)
     crown.position.set(pos[0], 2.6 + HALL_H + 1, pos[2])
-    crown.raycast = () => {}
     crown.userData.chNoShadow = true
     group.add(crown)
 
     const lamp = new THREE.Mesh(own(new THREE.SphereGeometry(1.9, 10, 8)), neonWhite)
     lamp.position.set(pos[0], 2.6 + HALL_H + 5.4, pos[2])
-    lamp.raycast = () => {}
     lamp.userData.chNoShadow = true
     group.add(lamp)
 
@@ -118,7 +119,6 @@ export const createKeeper: WorldFactory = (ctx): WorldModule => {
 
     const beacon = new THREE.Mesh(own(new THREE.SphereGeometry(1.5, 10, 8)), neonSoft)
     beacon.position.set(pos[0] + HALL_W / 2 - 3, 2.6 + HALL_H + 15.5, pos[2] - HALL_D / 2 + 3)
-    beacon.raycast = () => {}
     beacon.userData.chNoShadow = true
     group.add(beacon)
 
@@ -299,6 +299,9 @@ export const createKeeper: WorldFactory = (ctx): WorldModule => {
         return `${k.role} · term ${k.term} · commit ${k.commitIndex}`
       },
     })
+    ctx.alias(halls[i].crown, `keeper.${i}`)
+    ctx.alias(halls[i].lamp, `keeper.${i}`)
+    ctx.alias(halls[i].beacon, `keeper.${i}`)
   }
 
   /* --- update ------------------------------------------------------------- */

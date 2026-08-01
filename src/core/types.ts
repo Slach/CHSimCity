@@ -691,8 +691,9 @@ export interface NodeSim {
 
 export interface DistributedSim {
   /**
-   * Blocks waiting in `data/<cluster>/shard<N>_replica<M>/` for a background
-   * flush — on THIS server's disk. Indexed by shard.
+   * Blocks waiting under `data/<database>/<table>/` for a background flush —
+   * on THIS server's disk, the queue `system.distribution_queue` reports.
+   * Indexed by destination shard.
    */
   pendingBlocks: number[]
   pendingBytes: number[]
@@ -879,9 +880,11 @@ export interface FlowRequest {
   /** world units/sec; defaults to the route's speed */
   speed?: number
   /**
-   * Packet bulk, 1 being the route's own. This is the BATCH: the sim derives it
-   * from the row count of the block, the mark range or the merge that is
-   * actually moving, via `flowSize()`. Clamped by the engine.
+   * Packet bulk in DECADES of rows above 100. This is the BATCH: the sim
+   * derives it from the row count of the block, the mark range or the merge
+   * that is actually moving, via `flowSize()` — never any other way. The
+   * engine stretches the pod's LENGTH ×2.5 per decade and widens it only
+   * gently, so the batch is read along the duct. Clamped by the engine.
    */
   size?: number
   kind?: FlowKind
@@ -1003,6 +1006,14 @@ export interface WorldContext {
   sim: SimState
   quality: QualitySettings
   register(def: ComponentDef): void
+  /**
+   * Make an extra object click as an already-registered component. Every
+   * visible part of a labelled component — beacon lamps, glass shells, status
+   * lights — must select it; `test/` cannot check this, so the rule is here:
+   * never disable `raycast` on a mesh that visually belongs to a component
+   * without aliasing it (or a parent) to that component first.
+   */
+  alias(obj: THREE.Object3D, id: string): void
   flow(req: FlowRequest): void
   theme: ThemeApi
 }
