@@ -322,7 +322,7 @@ export function createHud(ctx: UiContext): UiModule {
     {
       class: 'ch-btn',
       type: 'button',
-      title: 'Fly mode (F) — free flight, click the scene to capture the mouse',
+      title: 'Fly mode (F) — free flight, mouse captured on entry; Esc releases it',
       on: { click: () => toggleFly() },
     },
     icon('fly', 13),
@@ -514,6 +514,15 @@ export function createHud(ctx: UiContext): UiModule {
     'keeper.ensemble',
   ]
 
+  /**
+   * The palette and the help panel own Esc while they are up, and both are
+   * `hidden` when closed — that attribute is what `tokens.css` turns into
+   * `display: none`, so it is the honest test for "is this thing on screen".
+   */
+  function overlayOpen(): boolean {
+    return document.querySelector('.pal-overlay:not([hidden]), .help:not([hidden])') !== null
+  }
+
   function onKeyDown(e: KeyboardEvent): void {
     if (isTypingTarget(e.target) || e.metaKey || e.ctrlKey || e.altKey) return
 
@@ -549,7 +558,17 @@ export function createHud(ctx: UiContext): UiModule {
         // we never see the key. The second one, which we do see, leaves the mode.
         if (ctx.getCamera().mode === 'fly' && !ctx.getCamera().locked) {
           ctx.bus.emit('camera:mode', { mode: 'orbit' })
+          return
         }
+        /* Esc is "never mind", and the loudest thing it can undo is a
+         * selection: an outlined building and a lit duct stay on screen until
+         * something replaces them, and clicking empty ground is a poor way to
+         * ask for nothing — the ray usually finds the plate, or a duct behind
+         * it. Both channels, because a packet and a structure are alternative
+         * answers to "what am I looking at" and either may be the live one. */
+        if (overlayOpen() || ctx.getCamera().mode === 'tour') return
+        ctx.bus.emit('select', { id: null })
+        ctx.bus.emit('flow:select', { route: null })
         return
       case 'N':
         toggleThemeMode()
@@ -633,8 +652,8 @@ export function createHud(ctx: UiContext): UiModule {
             setText(
               flyHint,
               cam.locked
-                ? 'Esc releases the mouse · wheel changes speed · Space / C for up and down'
-                : 'click the scene to capture the mouse · Esc leaves fly mode',
+                ? 'Esc releases the mouse · click to grab it again · wheel changes speed · Space / C for up and down'
+                : 'click the scene to grab the mouse back · Esc leaves fly mode',
             )
             setClass(flyOverlay, 'is-locked', cam.locked)
           }

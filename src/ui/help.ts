@@ -21,13 +21,13 @@ const CAMERA_KEYS: [string, string][] = [
   ['Click', 'Select a structure · double-click to fly to it'],
   ['Click a moving packet', 'What it is, where it came from and where it is going — and its whole duct lights up'],
   ['W A S D / arrows', 'Move'],
-  ['PageUp / PageDown', 'Change altitude'],
+  ['Space · C', 'Up · down, world-vertical — also E · Q, also PageUp · PageDown'],
   ['Shift · Alt', 'Boost · precision'],
 ]
 
 const KEYS: [string, string][] = [
-  ['F', 'Fly mode on and off. Click the scene to capture the mouse; Esc gives it back'],
-  ['Esc', 'Release the mouse · press again to leave fly mode'],
+  ['F', 'Fly mode on and off. The mouse is captured as you enter; Esc gives it back'],
+  ['Esc', 'Clear the selection · in fly mode, release the mouse, then leave the mode'],
   ['H', 'Back to the establishing shot'],
   ['T', 'Guided tour'],
   ['/ or Ctrl-K', 'Search every component, setting and scenario'],
@@ -42,7 +42,7 @@ const KEYS: [string, string][] = [
 /** In fly mode the movement keys mean something the orbit list does not cover. */
 const FLY_KEYS: [string, string][] = [
   ['W A S D', 'Move, relative to where you are looking'],
-  ['Space · C', 'Rise · descend, always world-vertical'],
+  ['Space · C', 'Rise · descend — the same keys as in orbit, and still world-vertical'],
   ['Wheel · pinch', 'Move along the way you are looking'],
   ['Shift-wheel', 'Change how fast W A S D move you'],
   ['Shift · Alt', 'Boost · precision'],

@@ -173,13 +173,34 @@ const MOVE_CODES = new Set([
   'PageDown',
 ])
 
-const FLY_ONLY_CODES = new Set(['Space', 'KeyE', 'KeyC', 'KeyQ'])
+/** A control that Space would press. Buttons and links, focused, are theirs. */
+function isActivatable(el: Element | null): boolean {
+  if (!el || el === document.body) return false
+  const tag = el.tagName
+  return tag === 'BUTTON' || tag === 'A' || tag === 'SUMMARY' || el.getAttribute('role') === 'button'
+}
 
 function isTypingTarget(t: EventTarget | null): boolean {
   const el = t as HTMLElement | null
   if (!el || typeof el.tagName !== 'string') return false
   const tag = el.tagName
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable === true
+}
+
+/**
+ * Where the orbit pivot goes when orbit adopts the view the camera is already
+ * in: down the view ray to the ground plane the whole city stands on.
+ *
+ * `fallback` is used when that ray never reaches the ground — you are looking
+ * at the sky, or you are underground in the storage pit, and there is nothing
+ * in front of you to orbit.
+ */
+export function groundPivotDistance(eyeY: number, forwardY: number, fallback: number): number {
+  if (eyeY > 1 && forwardY < -1e-3) {
+    const t = -eyeY / forwardY
+    if (t > 0) return clamp(t, MIN_DIST, MAX_DIST)
+  }
+  return clamp(fallback, MIN_DIST, MAX_DIST)
 }
 
 /** Wheel deltas normalised to CSS pixels. `deltaMode` is lines or pages. */
@@ -362,6 +383,27 @@ export function createCameraRig(
     _v2.setFromSpherical(_sph)
     pivot.copy(camera.position).sub(_v2)
     pivotT.copy(pivot)
+  }
+
+  /**
+   * How far ahead to plant the pivot when orbit adopts the CURRENT view.
+   *
+   * Leaving fly mode used to keep the orbit radius the camera had before it —
+   * you orbit the cluster from 500 units out, press F, fly down between two
+   * islands, press F again, and the eye is preserved but the pivot is planted
+   * 500 units ahead of you, out past everything you flew to. The mode flip
+   * itself looks right and the very first drag then swings you a hundred units
+   * across the map, back towards the view you left: the camera appears to
+   * "return" to where it was before you ever flew.
+   *
+   * So the pivot goes where you are LOOKING: the ground plane the whole city
+   * stands on, straight down the view ray. Looking at the sky, or standing
+   * below ground in the storage pit, there is nothing to orbit — then the old
+   * radius is as good an answer as any.
+   */
+  function viewPivotDistance(fallback: number): number {
+    _fwd.set(0, 0, -1).applyQuaternion(camera.quaternion)
+    return groundPivotDistance(camera.position.y, _fwd.y, fallback)
   }
 
   /** Applied only where the user actively drives the pivot. */
@@ -644,10 +686,11 @@ export function createCameraRig(
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') shiftDown = true
     if (e.code === 'AltLeft' || e.code === 'AltRight') altDown = true
     if (!MOVE_CODES.has(e.code)) return
-    if (mode === 'orbit' && FLY_ONLY_CODES.has(e.code) && e.code !== 'KeyE' && e.code !== 'KeyQ') {
-      // Space in orbit mode is not ours; leave it for the HUD.
-      if (e.code === 'Space') return
-    }
+    /* Space is also "press the focused control". A visitor who tabbed to Fly or
+     * Tour and hit Space means the button, not the camera — so the camera only
+     * takes Space when nothing activatable holds focus. Every other movement
+     * key is unambiguous. */
+    if (e.code === 'Space' && isActivatable(document.activeElement)) return
     interrupt()
     keys.add(e.code)
     if (e.code === 'Space' || e.code === 'PageUp' || e.code === 'PageDown') e.preventDefault()
@@ -763,8 +806,13 @@ export function createCameraRig(
     if (keys.has('KeyS') || keys.has('ArrowDown')) _v1.z += 1
     if (keys.has('KeyA') || keys.has('ArrowLeft')) _v1.x -= 1
     if (keys.has('KeyD') || keys.has('ArrowRight')) _v1.x += 1
-    if (keys.has('PageUp')) _v1.y += 1
-    if (keys.has('PageDown')) _v1.y -= 1
+    /* Altitude, on the same keys as fly. Orbit used to accept PageUp/PageDown
+     * only, so Space and C — the pair the help panel, the fly hint and every
+     * other 3D application call "up and down" — silently did nothing until you
+     * pressed F first. There is nothing fly-specific about raising the pivot:
+     * the orbit rig has always been able to do it. */
+    if (keys.has('Space') || keys.has('KeyE') || keys.has('PageUp')) _v1.y += 1
+    if (keys.has('KeyC') || keys.has('KeyQ') || keys.has('PageDown')) _v1.y -= 1
     if (_v1.lengthSq() > 0) {
       _v1.normalize()
       _right.set(1, 0, 0).applyQuaternion(camera.quaternion).setY(0).normalize()
@@ -1013,11 +1061,19 @@ export function createCameraRig(
       cancelScript()
       syncFlyFromCamera()
       setMode_('fly')
+      /* Grab the mouse NOW. Entering fly and then having to click the scene to
+       * look around is one gesture too many for a mode you leave and re-enter
+       * constantly. A keydown is a user activation, so the browser grants the
+       * lock from the F handler; when it does not (the mode was entered by a
+       * tour, a scenario or the palette, with no gesture behind it)
+       * `requestLock` swallows the refusal and drag-look still works. */
+      requestLock()
       return
     }
     if (m === 'orbit') {
       cancelScript()
-      syncOrbitFromCamera(dist)
+      // Out of fly, the old radius is meaningless — see viewPivotDistance.
+      syncOrbitFromCamera(mode === 'fly' ? viewPivotDistance(dist) : dist)
       if (locked && document.exitPointerLock) document.exitPointerLock()
       setMode_('orbit')
       return
