@@ -631,35 +631,41 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
 
     /* ---- the cache deck ------------------------------------------------ */
 
+    /* The deck stands on the EAST FLANK and runs along z, end-on to the yard:
+     * `CITY.cacheDeck.w` is its length in z and `.d` its width in x. It swapped
+     * places with the read pool — see `LOCAL.cacheDeck` for why a cache belongs
+     * beside the pipeline and a pool on it. */
+    const deckX = LOCAL.cacheDeck[0]
     const deckY = LOCAL.cacheDeck[1]
-    const cacheDeck = new THREE.Mesh(theme.box(CITY.cacheDeck.w, 1.6, CITY.cacheDeck.d), matStruct)
-    cacheDeck.position.set(0, deckY - 0.8, LOCAL.cacheDeck[2])
+    const cacheDeck = new THREE.Mesh(theme.box(CITY.cacheDeck.d, 1.6, CITY.cacheDeck.w), matStruct)
+    cacheDeck.position.set(deckX, deckY - 0.8, LOCAL.cacheDeck[2])
     cacheDeck.castShadow = true
     cacheDeck.receiveShadow = true
     g.add(cacheDeck)
-    pushBoxEdges(edgeVerts, [0, deckY - 0.8, LOCAL.cacheDeck[2], CITY.cacheDeck.w, 1.6, CITY.cacheDeck.d])
+    pushBoxEdges(edgeVerts, [deckX, deckY - 0.8, LOCAL.cacheDeck[2], CITY.cacheDeck.d, 1.6, CITY.cacheDeck.w])
 
-    // Two piers holding the deck up over the yard's north causeway.
-    for (const px of [-CITY.cacheDeck.w / 2 + 6, CITY.cacheDeck.w / 2 - 6]) {
+    // Two piers holding the deck up, one at each end of its run.
+    for (const pz of [-CITY.cacheDeck.w / 2 + 6, CITY.cacheDeck.w / 2 - 6]) {
       const pier = new THREE.Mesh(theme.box(2.4, deckY, 2.4), matTrim)
-      pier.position.set(px, deckY / 2, LOCAL.cacheDeck[2])
+      pier.position.set(deckX, deckY / 2, LOCAL.cacheDeck[2] + pz)
       pier.castShadow = true
       g.add(pier)
     }
 
+    /** Long axis along z now that the deck does: `TANK_W` is the z extent. */
     const TANK_W = 30
     const TANK_H = 11
     const TANK_D = 12
 
-    function tank(x: number, hex: number, label: string): { fill: THREE.Mesh; lamp: THREE.Mesh } {
-      const shell = new THREE.Mesh(theme.box(TANK_W, TANK_H, TANK_D), matGlass)
-      shell.position.set(x, deckY + TANK_H / 2, LOCAL.cacheDeck[2])
+    function tank(z: number, hex: number, label: string): { fill: THREE.Mesh; lamp: THREE.Mesh } {
+      const shell = new THREE.Mesh(theme.box(TANK_D, TANK_H, TANK_W), matGlass)
+      shell.position.set(deckX, deckY + TANK_H / 2, z)
       g.add(shell)
-      pushBoxEdges(edgeVerts, [x, deckY + TANK_H / 2, LOCAL.cacheDeck[2], TANK_W, TANK_H, TANK_D])
+      pushBoxEdges(edgeVerts, [deckX, deckY + TANK_H / 2, z, TANK_D, TANK_H, TANK_W])
 
-      const fillGeo = own(new THREE.BoxGeometry(TANK_W - 1.6, 1, TANK_D - 1.6))
+      const fillGeo = own(new THREE.BoxGeometry(TANK_D - 1.6, 1, TANK_W - 1.6))
       const fill = new THREE.Mesh(fillGeo, theme.neon(hex, 1.2))
-      fill.position.set(x, deckY + 0.5, LOCAL.cacheDeck[2])
+      fill.position.set(deckX, deckY + 0.5, z)
       fill.raycast = () => {}
       fill.userData.chNoShadow = true
       g.add(fill)
@@ -668,55 +674,67 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       // whether the cache is doing anything, and it is not the fill level.
       const lampGeo = own(new THREE.SphereGeometry(1.5, 10, 8))
       const lamp = new THREE.Mesh(lampGeo, neonWhite)
-      lamp.position.set(x, deckY + TANK_H + 2.2, LOCAL.cacheDeck[2])
+      lamp.position.set(deckX, deckY + TANK_H + 2.2, z)
       lamp.raycast = () => {}
       lamp.userData.chNoShadow = true
       g.add(lamp)
 
+      // The name faces WEST, into the island: from the plate's old +z facing it
+      // would be edge-on to every camera that ever looks at this flank.
       const tex = theme.textTexture(label, { size: 40, color: '#dbe7ff' })
       const plate = new THREE.Mesh(
         own(new THREE.PlaneGeometry(20, 4.4)),
         own(new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false, toneMapped: false })),
       )
-      plate.position.set(x, deckY + TANK_H / 2, LOCAL.cacheDeck[2] + TANK_D / 2 + 0.2)
+      plate.position.set(deckX - TANK_D / 2 - 0.2, deckY + TANK_H / 2, z)
+      plate.rotation.y = -Math.PI / 2
       plate.raycast = () => {}
       g.add(plate)
 
       return { fill, lamp }
     }
 
-    const markTank = tank(LOCAL.markCache[0], COLOR.markCache, 'mark_cache')
-    const blockTank = tank(LOCAL.uncompressedCache[0], COLOR.blockCache, 'uncompressed')
+    const markTank = tank(LOCAL.markCache[2], COLOR.markCache, 'mark_cache')
+    const blockTank = tank(LOCAL.uncompressedCache[2], COLOR.blockCache, 'uncompressed')
 
     /* ---- the insert dock ----------------------------------------------- */
 
-    const dockSpecs: BoxSpec[] = [
-      // the arrival apron
-      [LOCAL.insertDock[0], 1.4, LOCAL.insertDock[2], 30, 2.8, 16],
-      // the sort table: a wide low bench, because sorting is a pass over memory
-      [LOCAL.sortTable[0], 3.4, LOCAL.sortTable[2], 18, 6.8, 12],
-      // the column writers: one stack per stream, which is why it is tall
-      [LOCAL.columnWriters[0], 5.5, LOCAL.columnWriters[2], 16, 11, 12],
+    /* ONE mass, not three. An arrival apron, a sort bench and a writer block
+     * standing apart drew three services that a block is handed between, and
+     * `MergeTreeDataWriter::writeTempPart` is one call on one thread — the
+     * INSERT's own — that does not return until the part directory exists. The
+     * stages are still visible, but as motion along this roof rather than as
+     * separate buildings; the ducts run at `WRITER_DUCT_Y` for that reason. */
+    const dockSpec: BoxSpec = [
+      LOCAL.insertDock[0],
+      CITY.writer.h / 2,
+      LOCAL.insertDock[2],
+      CITY.writer.w,
+      CITY.writer.h,
+      CITY.writer.d,
     ]
-    for (const s of dockSpecs) {
-      const m = new THREE.Mesh(theme.box(s[3], s[4], s[5]), matStruct)
-      m.position.set(s[0], s[1], s[2])
-      m.castShadow = true
-      m.receiveShadow = true
-      g.add(m)
-      pushBoxEdges(edgeVerts, s)
-    }
+    const dockMesh = new THREE.Mesh(theme.box(dockSpec[3], dockSpec[4], dockSpec[5]), matStruct)
+    dockMesh.position.set(dockSpec[0], dockSpec[1], dockSpec[2])
+    dockMesh.castShadow = true
+    dockMesh.receiveShadow = true
+    g.add(dockMesh)
+    pushBoxEdges(edgeVerts, dockSpec)
 
-    // One thin stack per stream on the writer block: a wide table really does
-    // open this many files per part, and that is why `min_bytes_for_wide_part`
-    // exists.
+    // One thin stack per stream, on the roof over the writer stage's end of the
+    // machine: a wide table really does open this many files per part, and that
+    // is why `min_bytes_for_wide_part` exists. They are also what marks the east
+    // end as the writing end now that there is no separate writer block.
     const streamCount0 = Math.min(24, streamCount(0))
     for (let i = 0; i < streamCount0; i++) {
       const stack = new THREE.Mesh(unitCyl, matTrim)
       stack.position.set(
         LOCAL.columnWriters[0] - 7 + (i % 12) * 1.28,
-        11 + 1.6,
-        LOCAL.columnWriters[2] - 3 + Math.floor(i / 12) * 5,
+        CITY.writer.h + 1.6,
+        /* The roof's SOUTH edge. On the north half they were behind ten units
+         * of building from every angle the strip is actually viewed from —
+         * the yard is south of here, so that is where the camera stands. The
+         * ducts keep the spine. */
+        LOCAL.columnWriters[2] + 5 + Math.floor(i / 12) * 2.6,
       )
       stack.scale.set(0.7, 3.2, 0.7)
       stack.castShadow = true
@@ -748,13 +766,18 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
     readerBarMesh.raycast = () => {}
     readerBarMesh.userData.chNoShadow = true
     for (let i = 0; i < N_READ_THREADS; i++) {
+      /* The bays run along x now, so the box turns with them: 6.4 across the
+       * line of bays leaves 2.6 of gap at the 9-unit pitch, and the deep side
+       * faces the yard. The progress bar sits on the SOUTH face for the same
+       * reason it used to sit on the west one — it faces where the data comes
+       * from. */
       const b = readerBayLocal(i)
-      const bay = new THREE.Mesh(theme.box(9, 5.2, 6.4), matTrim)
+      const bay = new THREE.Mesh(theme.box(6.4, 5.2, 9), matTrim)
       bay.position.set(b[0], 2.6, b[2])
       bay.castShadow = true
       g.add(bay)
-      setBox(readerMesh, i, b[0], 5.6, b[2], 6.4, 1.2, 4.4)
-      setBox(readerBarMesh, i, b[0] - 3.6, 5.6, b[2], 0.6, 1.4, 4.4)
+      setBox(readerMesh, i, b[0], 5.6, b[2], 4.4, 1.2, 6.4)
+      setBox(readerBarMesh, i, b[0], 5.6, b[2] + 3.6, 4.4, 1.4, 0.6)
       _c.setRGB(0, 0, 0)
       readerMesh.setColorAt(i, _c)
       readerBarMesh.setColorAt(i, _c)
@@ -1060,22 +1083,24 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
      * it wins its own click. */
     proxy(built, 'island', 0, 1, 0, CITY.node.w, 10, CITY.node.d)
     proxy(built, 'yard', 0, Y.baseY + Y.maxRise / 2, 0, Y.deckW, Y.maxRise + 4, Y.deckD)
-    proxy(built, 'insertdock', 0, 6, LOCAL.insertDock[2], 96, 14, 22)
+    proxy(built, 'insertdock', 0, CITY.writer.h / 2, LOCAL.insertDock[2], CITY.writer.w + 6, CITY.writer.h + 8, CITY.writer.d + 4)
     proxy(built, 'analysis', LOCAL.indexAnalysis[0], 5, LOCAL.indexAnalysis[2], 15, 12, 18)
     proxy(built, 'primaryindex', LOCAL.primaryIndex[0], idxH / 2, 0, 9, idxH, Math.abs(bandZLocal(0)) * 2 + 10)
     proxy(built, 'skipindexes', LOCAL.skipIndexes[0], 6, 0, 24, 12, Math.abs(bandZLocal(0)) * 2 + 10)
-    proxy(built, 'markcache', LOCAL.markCache[0], deckY + TANK_H / 2, LOCAL.markCache[2], TANK_W, TANK_H + 6, TANK_D)
+    // Extents follow the deck's rotation: the tanks are long in z now.
+    proxy(built, 'markcache', LOCAL.markCache[0], deckY + TANK_H / 2, LOCAL.markCache[2], TANK_D, TANK_H + 6, TANK_W)
     proxy(
       built,
       'uncompressedcache',
       LOCAL.uncompressedCache[0],
       deckY + TANK_H / 2,
       LOCAL.uncompressedCache[2],
-      TANK_W,
-      TANK_H + 6,
       TANK_D,
+      TANK_H + 6,
+      TANK_W,
     )
-    proxy(built, 'readpool', LOCAL.readPool[0], 7, LOCAL.readPool[2] + 18, 20, 16, 92)
+    // The strip runs from the dispatcher at its west end to the last bay.
+    proxy(built, 'readpool', LOCAL.readPool[0] - 14, 7, LOCAL.readPool[2], 92, 16, 20)
     proxy(built, 'merges', 0, gantryY - 2, LOCAL.mergeGantry[2], HALF_YARD_X * 2 + 18, 14, 12)
     proxy(built, 'ttl', LOCAL.ttlWorks[0], 9, LOCAL.ttlWorks[2], 22, 22, 20)
     proxy(built, 'volumes', LOCAL.hotVolume[0], (CITY.storage.hotY + CITY.storage.coldY) / 2, LOCAL.hotVolume[2], CITY.storage.w, 34, CITY.storage.d)
@@ -1158,13 +1183,13 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
     ctx.register({
       id: `node.${n}.insertdock`,
       name: 'MergeTreeDataWriter',
-      role: 'sort by ORDER BY, split by PARTITION BY, compress each column',
+      role: 'one call: sort by ORDER BY, split by PARTITION BY, compress each column',
       kind: 'process',
       district: 'nodes',
       object: P.insertdock,
       tier: 1,
-      focus: { target: w(0, 8, LOCAL.insertDock[2]), distance: 90, dir: [0.2, 0.5, -0.9] },
-      labelAt: w(0, 20, LOCAL.insertDock[2]),
+      focus: { target: w(0, CITY.writer.h / 2, LOCAL.insertDock[2]), distance: 110, dir: [0.2, 0.5, -0.9] },
+      labelAt: w(0, CITY.writer.h + 12, LOCAL.insertDock[2]),
       color: COLOR.partPreactive,
       readout: (s) => {
         const nd = s.nodes[n]
@@ -1247,7 +1272,8 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       district: 'nodes',
       object: P.markcache,
       tier: 2,
-      focus: { target: w(LOCAL.markCache[0], deckY + tankH / 2, LOCAL.markCache[2]), distance: 60, dir: [0.2, 0.5, -0.8] },
+      // From the island side: the flank deck's named face looks west.
+      focus: { target: w(LOCAL.markCache[0], deckY + tankH / 2, LOCAL.markCache[2]), distance: 60, dir: [-0.85, 0.45, 0.25] },
       labelAt: w(LOCAL.markCache[0], deckY + tankH + 8, LOCAL.markCache[2]),
       color: COLOR.markCache,
       readout: (s) => {
@@ -1267,7 +1293,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       focus: {
         target: w(LOCAL.uncompressedCache[0], deckY + tankH / 2, LOCAL.uncompressedCache[2]),
         distance: 60,
-        dir: [0.2, 0.5, -0.8],
+        dir: [-0.85, 0.45, 0.25],
       },
       labelAt: w(LOCAL.uncompressedCache[0], deckY + tankH + 8, LOCAL.uncompressedCache[2]),
       color: COLOR.blockCache,
@@ -1286,8 +1312,9 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
       district: 'nodes',
       object: P.readpool,
       tier: 1,
-      focus: { target: w(LOCAL.readPool[0], 8, LOCAL.readPool[2] + 18), distance: 110, dir: [0.85, 0.45, 0.2] },
-      labelAt: w(LOCAL.readPool[0], 22, LOCAL.readPool[2] + 18),
+      // Seen from the yard's side, which is the side the bays face.
+      focus: { target: w(LOCAL.readPool[0] - 14, 8, LOCAL.readPool[2]), distance: 110, dir: [0.15, 0.5, 0.85] },
+      labelAt: w(LOCAL.readPool[0] - 14, 22, LOCAL.readPool[2]),
       color: COLOR.reader,
       readout: (s) => {
         const nd = s.nodes[n]
@@ -1530,7 +1557,7 @@ export const createNodes: WorldFactory = (ctx): WorldModule => {
         // visibly takes longer than one with a small range.
         const b = readerBayLocal(i)
         const h = 0.4 + r.progress * 5.6
-        setBox(isl.readerBarMesh, i, b[0] - 3.6, 5.6 + h / 2 - 0.7, b[2], 0.7, h, 4.4)
+        setBox(isl.readerBarMesh, i, b[0], 5.6 + h / 2 - 0.7, b[2] + 3.6, 4.4, h, 0.7)
         _c.setHex(COLOR.ok).multiplyScalar(active ? 1.3 : 0)
         isl.readerBarMesh.setColorAt(i, _c)
 

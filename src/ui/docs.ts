@@ -464,11 +464,13 @@ That is the failure mode \`max_replica_delay_for_distributed_queries\` exists fo
 
 **3. Write the columns.** Each column — and each *stream* within a column — is compressed in blocks of at most \`max_compress_block_size\` and written to its own \`.bin\`, with a \`.mrk3\` recording where every granule starts. \`primary.cidx\` gets one sorting-key row per granule. All of it goes into a directory named \`tmp_insert_…\`.
 
-**4. Rename.** The directory is renamed into place, the part enters \`preactive\`, joins the data-part set under lock, and becomes \`active\`. That rename is the commit, and it is atomic.`,
+**4. Rename.** The directory is renamed into place, the part enters \`preactive\`, joins the data-part set under lock, and becomes \`active\`. That rename is the commit, and it is atomic.
+
+All four happen inside **one** call, \`writeTempPart\`, on the thread that is serving the INSERT — which is why this is one building and not four. It does not return until the part directory is on disk. The pod you can watch travelling along its roof is the ORDER of the stages, not a hand-off between services.`,
       },
       {
         heading: 'One column is several files',
-        body: `The stacks on the writer block are streams, not columns, and there are more of them than you expect. An \`Array\` adds an offsets stream. A \`Map\` is two arrays, so three streams. A \`LowCardinality\` adds its dictionary. A \`JSON\` column adds one per discovered subcolumn.
+        body: `The stacks on the machine's east end are streams, not columns, and there are more of them than you expect. An \`Array\` adds an offsets stream. A \`Map\` is two arrays, so three streams. A \`LowCardinality\` adds its dictionary. A \`JSON\` column adds one per discovered subcolumn.
 
 The \`hits\` table in this model has ${TABLES[0].columns.length} columns and ${streamCount(0)} streams, and every one of them is a \`.bin\` and a \`.mrk3\` in every part. That is what \`min_bytes_for_wide_part\` exists to avoid: below that threshold the part is stored **Compact**, with all columns in one file, because a part with 400 tiny files is worse than a part with one.`,
       },

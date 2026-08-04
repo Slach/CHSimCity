@@ -97,8 +97,27 @@ export const CITY = {
     deckW: 120,
     deckD: 58,
   },
-  /** The cache deck above the yard's north side. */
+  /**
+   * The cache deck, on the island's EAST flank.
+   *
+   * `w` is the deck's LENGTH and it runs along z, `d` is its width across x —
+   * the deck stands end-on to the yard, not across its north side, because the
+   * read pool took that strip. The caches belong out here: a cache is consulted
+   * by the reading thread, it is not a stage the data passes through, so it is
+   * beside the pipeline rather than on it.
+   */
   cacheDeck: { w: 96, d: 20, y: 9 },
+  /**
+   * `MergeTreeDataWriter` — ONE machine, not three.
+   *
+   * Sorting, the partition split and the column writers used to stand as three
+   * separate blocks on this strip, and three blocks read as three services a
+   * block is handed between. They are not: `writeTempPart` is a single call on
+   * a single thread — the caller's — and it does not return until the part
+   * directory is on disk. One mass, with the stages running west to east along
+   * its length and the pod visible on its roof, is the honest shape.
+   */
+  writer: { w: 84, h: 10, d: 18 },
   /** Storage volumes, excavated under each island. */
   storage: { hotY: -20, coldY: -40, w: 120, d: 90 },
   /** The pit cut under each island so the volumes are visible from the surface. */
@@ -207,12 +226,19 @@ export const LOCAL = {
   /** Where partial results from the other shards are merged into an answer. */
   resultMerge: [92, 0, -95],
 
-  /** Where an INSERT block lands: MergeTreeDataWriter's dock. */
+  /** `MergeTreeDataWriter` itself — the centre of the one machine. */
   insertDock: [0, 0, -78],
-  /** The sort table: the block is sorted by the ORDER BY key here. */
-  sortTable: [-30, 0, -78],
-  /** The compressor and the column writers. */
-  columnWriters: [30, 0, -78],
+  /**
+   * The three stations BELOW are stages inside that one machine, not places of
+   * their own. They are still separate anchors because the stages are strictly
+   * sequential — the block is fully sorted before a byte is compressed — so the
+   * motion between them is real; it just happens along the roof of one building
+   * rather than across a yard between three.
+   */
+  /** Stage 1: the block is sorted in memory by the ORDER BY key. */
+  sortTable: [-26, 0, -78],
+  /** Stages 2 and 3: split by partition, then a stream per `.bin`. */
+  columnWriters: [26, 0, -78],
   /**
    * `primary.cidx` — the west end of the yard, ONE RACK PER TABLE BAND. The
    * z here is only the strip's reference line; the band's own z comes from
@@ -233,15 +259,30 @@ export const LOCAL = {
    * opposite of the order of events.
    */
   indexAnalysis: [-104, 0, -58],
-  /** The mark cache and the uncompressed cache, on one deck. */
-  cacheDeck: [0, CITY.cacheDeck.y, -52],
-  markCache: [-26, CITY.cacheDeck.y, -52],
-  uncompressedCache: [26, CITY.cacheDeck.y, -52],
+  /**
+   * The mark cache and the uncompressed cache, on one deck along the EAST
+   * flank. They traded places with the read pool.
+   *
+   * The pool is a STAGE of the read path — ranges in, threads out — so it
+   * belongs on the strip the query already runs along, between the planner and
+   * the yard. A cache is not a stage: it is ASKED, from the side, and either
+   * answers or does not. Out on the flank the pool made the pipeline turn a
+   * corner no mechanism asks for, and the caches sat where the eye reads them
+   * as something the data flows through.
+   */
+  cacheDeck: [104, CITY.cacheDeck.y, -6],
+  markCache: [104, CITY.cacheDeck.y, -32],
+  uncompressedCache: [104, CITY.cacheDeck.y, 20],
   /** system.parts — the yard itself. */
   partsYard: [0, 0, 0],
-  /** MergeTreeReadPool: the dispatcher plus its reader bays. */
-  readPool: [104, 0, -34],
-  readPoolDispatcher: [104, 0, -56],
+  /**
+   * `MergeTreeReadPool`: the dispatcher at the WEST end of the north strip,
+   * because west is where the finished (part, ranges) list comes from, and the
+   * reader bays running east from it. The bays face the yard, which is now
+   * directly south of them instead of off to one side.
+   */
+  readPool: [0, 0, -52],
+  readPoolDispatcher: [-52, 0, -52],
   /** system.merges — the gantry that straddles the yard's south side. */
   mergeGantry: [0, 0, 54],
   /** The TTL works: where expired rows are dropped or moved. */
@@ -254,6 +295,16 @@ export const LOCAL = {
   hotVolume: [0, CITY.storage.hotY, 6],
   coldVolume: [0, CITY.storage.coldY, 6],
 } as const satisfies Record<string, readonly [number, number, number]>
+
+/**
+ * The height every duct on the writer strip is held at.
+ *
+ * `MergeTreeDataWriter` is one solid mass `CITY.writer.h` tall, so a duct
+ * authored at the old plinth height of 6 runs INSIDE it: not merely hidden but
+ * unclickable, because the roof wins every ray before the tube. Everything that
+ * arrives at the writer, leaves it, or moves between its stages rides the roof.
+ */
+export const WRITER_DUCT_Y = CITY.writer.h + 3
 
 export type LocalAnchorId = keyof typeof LOCAL
 
@@ -404,11 +455,18 @@ export function bandZLocal(table: number): number {
   return (table - (N_TABLES - 1) / 2) * CITY.yard.bandPitch
 }
 
-/** Node-local position of reader thread `i`'s bay. */
+/**
+ * Node-local position of reader thread `i`'s bay.
+ *
+ * The bays run WEST TO EAST along the north strip, in the order the dispatcher
+ * deals to them. They used to run north to south along the east flank; the axis
+ * changed with the strip, and everything that draws a bay — the bay box, the
+ * progress bar, the duct out of the yard — reads its facing from here.
+ */
 export function readerBayLocal(i: number): [number, number, number] {
   const step = 9
-  const z = LOCAL.readPool[2] + 12 + i * step
-  return [LOCAL.readPool[0], 0, z]
+  const x = LOCAL.readPool[0] - 36 + i * step
+  return [x, 0, LOCAL.readPool[2]]
 }
 
 /** Node-local position of merge slot `i` on the gantry. */
@@ -1090,7 +1148,7 @@ for (let from = 0; from < N_NODES; from++) {
     const dockB = anchorAt(to, 'insertDock')
     const dropToDock: [number, number, number][] = [
       [b[0] + 24, Math.max(8, y * 0.55), b[2] + 10],
-      [dockB[0] + 6, 6, dockB[2] - 4],
+      [dockB[0] - CITY.writer.w / 2 + 8, WRITER_DUCT_Y, dockB[2] - 4],
     ]
 
     // The road belongs to the duct, not to any one of the three things on it,
@@ -1180,7 +1238,11 @@ for (let from = 0; from < N_NODES; from++) {
  * INSERT → sort by the ORDER BY key → split by partition → compress each
  * column into its own .bin → write marks → rename tmp_insert_ into place.
  * These are separate roads because they are separate, sequential pieces of
- * work: a block is fully sorted before a single byte is compressed. */
+ * work: a block is fully sorted before a single byte is compressed. They run
+ * along the ROOF of the single writer block, which is why every endpoint on
+ * this strip is at WRITER_DUCT_Y: the machine is `CITY.writer.h` tall and
+ * anything authored at the old plinth height of 6 is now inside it, invisible
+ * and unclickable. */
 
 for (let n = 0; n < N_NODES; n++) {
   const dock = anchorAt(n, 'insertDock')
@@ -1247,9 +1309,9 @@ for (let n = 0; n < N_NODES; n++) {
     [
       wheelTop,
       [wheelAt[0] + 8, 15, wheelAt[2] + 3],
-      [(wheelAt[0] + dock[0]) / 2, 12, (wheelAt[2] + dock[2]) / 2 - 4],
-      [dock[0] - 12, 8, dock[2] - 7],
-      [dock[0], 6, dock[2] - 4],
+      [(wheelAt[0] + dock[0]) / 2, 16, (wheelAt[2] + dock[2]) / 2 - 4],
+      [dock[0] - 24, WRITER_DUCT_Y + 3, dock[2] - 10],
+      [dock[0] - CITY.writer.w / 2 + 8, WRITER_DUCT_Y, dock[2] - 4],
     ],
     {
       what: "the slice for this server's own shard",
@@ -1293,17 +1355,22 @@ for (let n = 0; n < N_NODES; n++) {
     )
   }
 
+  /* The two internal legs run west to east ALONG THE ROOF of the one machine.
+   * Both name `node.n.insertdock` at each end, and that is not a mistake to be
+   * tidied away: sorting and writing are stages of one call, so there is no
+   * second component for them to belong to. What the motion says is that they
+   * are ORDERED, which is the part a single static box cannot say. */
   route(
     rid.sortBlock(n),
     [
-      [dock[0], 6, dock[2]],
-      [(dock[0] + sort[0]) / 2, 8, dock[2] - 2],
-      [sort[0], 6, sort[2]],
+      [dock[0] - CITY.writer.w / 2 + 8, WRITER_DUCT_Y, dock[2] - 4],
+      [(dock[0] - CITY.writer.w / 2 + 8 + sort[0]) / 2, WRITER_DUCT_Y + 1.5, dock[2] - 2],
+      [sort[0], WRITER_DUCT_Y, sort[2]],
     ],
     {
       what: 'a block on its way to be sorted',
       from: dockEnd,
-      to: { label: `${host} · sort table`, id: `node.${n}.insertdock` },
+      to: { label: `${host} · sort`, id: `node.${n}.insertdock` },
       note: 'The rows arrived in whatever order the client sent them. A part is sorted by the ORDER BY key by definition, so this happens before anything is written, in memory, at insert time.',
     },
     { color: COLOR.partTemporary, speed: 70, size: 1.2 },
@@ -1312,13 +1379,13 @@ for (let n = 0; n < N_NODES; n++) {
   route(
     rid.writeColumns(n),
     [
-      [sort[0], 6, sort[2] + 2],
-      [dock[0], 9, dock[2] + 6],
-      [writers[0], 6, writers[2]],
+      [sort[0], WRITER_DUCT_Y, sort[2] + 2],
+      [dock[0], WRITER_DUCT_Y + 2, dock[2] + 3],
+      [writers[0], WRITER_DUCT_Y, writers[2]],
     ],
     {
       what: 'a sorted block going to the column writers',
-      from: { label: `${host} · sort table`, id: `node.${n}.insertdock` },
+      from: { label: `${host} · sort`, id: `node.${n}.insertdock` },
       to: { label: `${host} · column writers`, id: `node.${n}.insertdock` },
       note: 'Split by the partition expression first — one part per partition, never one part spanning two — then each column is compressed into its own `.bin` with a `.mrk3` beside it.',
     },
@@ -1329,7 +1396,7 @@ for (let n = 0; n < N_NODES; n++) {
    * had `writers[0] * 0.5` — half of a WORLD x, which pulled the curve toward
    * world zero and across the neighbouring island — and a raw `-52` used as a
    * world z that was really a node-local one. It rides OVER the strip between
-   * the writers and the yard (the cache deck plate is at y ≈ 9), because a
+   * the writers and the yard (the read pool's bays stand on it), because a
    * ground-level shortcut reads as a road through buildings it has nothing to
    * do with. */
   /* One duct per TABLE, ending over that table's own band at the level-0 lane —
@@ -1339,21 +1406,36 @@ for (let n = 0; n < N_NODES; n++) {
    * had never pointed at. Held high and at COMMIT_OPACITY for the same reason
    * the split ducts are: this is the last leg of the INSERT and it has to be
    * followable across the whole island. */
-  const COMMIT_Y = 26
+  /* 21, not 26. The run only has to clear the reader bays on the strip between
+   * the writer and the yard (they top out at y ≈ 8), and every unit of height
+   * above that is paid for twice — once climbing and once diving — as bend in a
+   * duct whose whole job is to be followed. */
+  const COMMIT_Y = 21
   const COMMIT_OPACITY = 0.5
   for (let t = 0; t < N_TABLES; t++) {
     const laneZ = nodeLocal(n, 0, 0, partLaneZ(t, 0))[2]
-    // Its own lane in x on the way over, so three ducts crossing the same
-    // island read as three and not as one thick one.
-    const xLane = yard[0] + (t - (N_TABLES - 1) / 2) * 15
+    /* ONE PORT PER TABLE on the writer's south face, and the duct keeps that x
+     * the whole way: rise, run, descend, all in one vertical plane.
+     *
+     * All three used to leave the SAME point and then swing sideways to their
+     * own lane, which cost two S-bends each — one to get out of the shared
+     * mouth and one to come back over the band. Three ducts out of one mouth
+     * also said the wrong thing: the split by partition already happened, so
+     * what leaves the machine is several parts, not one stream that forks in
+     * mid-air. */
+    const px = writers[0] + (t - (N_TABLES - 1) / 2) * 13
+    /* The run has to stay MONOTONIC in z. The northernmost band's lane is only
+     * a few units south of where the climb levels off, so a fixed `laneZ - 28`
+     * put the second waypoint BEHIND the first and the curve doubled back on
+     * itself — a visible hook in the air over the read pool. */
+    const runZ = writers[2] + 22
     route(
       rid.commitPart(n, t),
       [
-        [writers[0], 7, writers[2] + 3],
-        [writers[0] - 3, COMMIT_Y - 6, writers[2] + 12],
-        [xLane, COMMIT_Y, (writers[2] + laneZ) / 2],
-        [xLane, COMMIT_Y - 5, laneZ - 16],
-        [yard[0], CITY.yard.baseY + 4.5, laneZ - 4.5],
+        [px, WRITER_DUCT_Y, writers[2] + 7],
+        [px, COMMIT_Y, runZ],
+        [px, COMMIT_Y, Math.max(runZ + 9, laneZ - 22)],
+        [px, CITY.yard.baseY + 4.5, laneZ - 4.5],
       ],
       {
         what: `a finished part being committed into ${TABLES[t].name}`,
@@ -1462,9 +1544,9 @@ for (let n = 0; n < N_NODES; n++) {
    * open ground towards x = 0 and came back. That is the "просто ужас": not the
    * idea, the arithmetic.
    *
-   * Held at READ_Y over the cache deck (its plate is at y ≈ 9) so the long haul
-   * from the pool to the west end reads as pipework and not as a road through
-   * the yard. */
+   * Held at READ_Y over the north strip — the reader bays and the dispatcher
+   * lamp top out at y ≈ 11 — so the haul along it reads as pipework and not as
+   * a road through the yard. */
   const READ_Y = 24
   for (let t = 0; t < N_TABLES; t++) {
     const gate = indexGateAt(n, t)
@@ -1531,11 +1613,14 @@ for (let n = 0; n < N_NODES; n++) {
    * between planning and execution. */
   route(
     rid.rangesToPool(n),
+    /* Short and high now that the dispatcher stands at the west end of the
+     * north strip, a few tens of units east of the planner: the seam between
+     * planning and execution is a step, not a haul around the island. */
     [
       [analysis[0] + 6, 12, analysis[2]],
-      nodeLocal(n, -40, READ_Y + 2, -74),
-      nodeLocal(n, 60, READ_Y + 2, -70),
-      [disp[0] - 6, 9, disp[2] - 4],
+      // Node-LOCAL, halfway between the planner (-104) and the dispatcher (-52).
+      nodeLocal(n, -78, READ_Y - 6, -62),
+      [disp[0] - 10, 10, disp[2] - 4],
     ],
     {
       what: 'the surviving (part, mark ranges) list, handed to the pipeline',
@@ -1552,9 +1637,9 @@ for (let n = 0; n < N_NODES; n++) {
     route(
       rid.poolToReader(n, th),
       [
-        [disp[0], 6, disp[2] + 4],
-        [bay[0] + 6, 6, (disp[2] + bay[2]) / 2],
-        [bay[0], 4, bay[2]],
+        [disp[0] + 4, 6, disp[2]],
+        [(disp[0] + bay[0]) / 2, 7, bay[2] - 7],
+        [bay[0], 4, bay[2] - 1],
       ],
       {
         what: 'a batch of mark ranges handed to one reader thread',
@@ -1571,15 +1656,15 @@ for (let n = 0; n < N_NODES; n++) {
      * eight different parts sent everything up one pipe and the pool looked like
      * a funnel with one input. It is a many-to-many: every thread reaches into
      * several parts, and several threads reach into the same part. The lanes are
-     * fanned out along the yard's east edge so they read as eight separate
-     * streams rather than one thick one. */
-    const laneZ = yard[2] + (th - (N_READ_THREADS - 1) / 2) * 7
+     * fanned out along the yard's NORTH edge — the edge the bays now face — so
+     * they read as eight separate streams rather than one thick one. */
+    const laneX = yard[0] + (th - (N_READ_THREADS - 1) / 2) * 7
     route(
       rid.readerToResult(n, th),
       [
-        [yard[0] + 34, 5, laneZ],
-        [(yard[0] + 34 + bay[0]) / 2, 7.5, (laneZ + bay[2]) / 2],
-        [bay[0] - 5.5, 5.5, bay[2]],
+        [laneX, 5, yard[2] - 34],
+        [(laneX + bay[0]) / 2, 7.5, (yard[2] - 34 + bay[2]) / 2],
+        [bay[0], 5.5, bay[2] + 5.5],
       ],
       {
         what: `decompressed column data on its way to reader thread ${th + 1}`,
@@ -1605,10 +1690,13 @@ for (let n = 0; n < N_NODES; n++) {
      * not stay where it was. */
     route(
       rid.markToReader(n, th),
+      /* West off the flank deck and along the north strip, ABOVE the bays: the
+       * cache is beside the pipeline, not on it, so its duct comes in from the
+       * side and from over the top rather than joining the line of travel. */
       [
-        [mc[0] + 8, mc[1] + 2, mc[2] + 2],
-        nodeLocal(n, 62, 16, -58),
-        [bay[0] + 4, 6.5, bay[2] - 3],
+        [mc[0] - 8, mc[1] + 2, mc[2] - 4],
+        nodeLocal(n, 62, 17, -46),
+        [bay[0] + 3, 6.5, bay[2] - 4],
       ],
       {
         what: `a marks file resolved for reader thread ${th + 1}`,
@@ -1762,31 +1850,51 @@ for (let s = 0; s < N_SHARDS; s++) {
       if (a === b) continue
       const from = nodeIndex(s, a)
       const to = nodeIndex(s, b)
+      /* YARD TO YARD. Both ends are `system.parts`, because a fetch is a part
+       * that already exists arriving whole: `Fetcher::fetchSelectedPart` pulls
+       * the directory over HTTP into a `tmp_fetch_` name and the replica renames
+       * it into its own data-part set. It is never sorted, never split by
+       * partition and never compressed again — so it does not touch
+       * `MergeTreeDataWriter`, and the wire must not end there.
+       *
+       * Ending it at the destination's insert dock is what made the part look
+       * LOST: it arrived at a machine that has no reason to be handling it, and
+       * the tower that appeared in the yard appeared from nothing. */
       const fy = anchorAt(from, 'partsYard')
-      const ty = anchorAt(to, 'insertDock')
-      /* The two replicas are now side by side, so a straight wire between them
-       * would run through both islands. It goes around instead: south out of the
-       * yard, west or east along a lane behind the pair, then up the DESTINATION's
-       * outer flank to its dock. Which flank is decided by the direction of
+      const ty = anchorAt(to, 'partsYard')
+      /* The two replicas are side by side, so a straight wire between them would
+       * run through both islands. It goes around instead: south out of the yard,
+       * west or east along a lane behind the pair, then up the DESTINATION's
+       * outer flank and in over it. Which flank is decided by the direction of
        * travel, so the two wires of a pair are mirror images and neither hides
        * the other — the old pair shared one lane and read as a single cable. */
       const flank = ty[0] > fy[0] ? 1 : -1
       const laneZ = NODE_Z + CITY.node.d / 2 + 34
       const flankX = ty[0] + flank * (CITY.node.w / 2 + 22)
+      const yardTop = CITY.yard.baseY + 5
       route(
         rid.fetchPart(from, to),
+        /* Only the two ENDS may stand over an island — `test/layout.test.ts`
+         * holds the wire to that, and it is why the arrival is one long dive
+         * instead of a considered descent: the last waypoint that is allowed to
+         * exist is out at `flankX`, past the island's edge. So it is taken high
+         * there. Whichever flank the wire comes in over has furniture at
+         * x = ±104 — the cache deck, whose lamps reach y ≈ 22, or the index
+         * racks — and the dive has to be above it when it crosses. */
         [
-          [fy[0], 6, fy[2] + 34],
-          [fy[0] + (flankX - fy[0]) * 0.2, 7, laneZ],
+          [fy[0] + flank * 20, yardTop, fy[2] + 20],
+          [fy[0] + (flankX - fy[0]) * 0.4, 7, laneZ],
           [flankX, 7, laneZ],
-          [flankX, 7, ty[2] - 22],
-          [ty[0] + flank * 10, 6, ty[2] - 8],
+          // 40, not 34: at 34 the dive grazed the mark cache's hit-ratio lamp
+          // (its crown is at y = 23.7) with 0.07 to spare.
+          [flankX, 40, ty[2] + 30],
+          [ty[0] + flank * 46, CITY.yard.baseY + 10, ty[2] + 6],
         ],
         {
           what: 'a whole part directory over HTTP',
           from: { label: `${nodeHost(from)} · parts yard`, id: `node.${from}.yard` },
-          to: { label: `${nodeHost(to)} · insert dock`, id: `node.${to}.insertdock` },
-          note: `The biggest thing that moves in this cluster, and it goes replica to replica — never through Keeper, which only said the part existed. Both machines are in shard ${s + 1} and hold the same rows; that is what a replica is.`,
+          to: { label: `${nodeHost(to)} · parts yard`, id: `node.${to}.yard` },
+          note: `The biggest thing that moves in this cluster, and it goes replica to replica — never through Keeper, which only said the part existed. It arrives as a finished directory and is renamed into place, so it lands in \`system.parts\` at the level it already had: a fetched part is not re-sorted, not re-split and not re-compressed. Both machines are in shard ${s + 1} and hold the same rows; that is what a replica is.`,
         },
         { color: COLOR.fetch, speed: 100, size: 1.35, visible: true, roadOpacity: 0.15 },
       )
